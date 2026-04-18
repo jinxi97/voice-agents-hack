@@ -18,8 +18,83 @@ class VideoCallApp extends StatelessWidget {
     return MaterialApp(
       title: 'Agora Video Call',
       theme: ThemeData.dark(useMaterial3: true),
-      home: const CallPage(),
+      home: const HomeScreen(),
     );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  int _index = 0;
+
+  static const _tabs = [
+    _VideoCallTab(),
+    _LibraryTab(),
+    _SettingsTab(),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: _tabs[_index],
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _index,
+        onDestinationSelected: (i) => setState(() => _index = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.videocam), label: 'Video Call'),
+          NavigationDestination(icon: Icon(Icons.library_books), label: 'Library'),
+          NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
+        ],
+      ),
+    );
+  }
+}
+
+class _VideoCallTab extends StatelessWidget {
+  const _VideoCallTab();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: GestureDetector(
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => const CallPage()),
+        ),
+        child: Container(
+          width: 96,
+          height: 96,
+          decoration: const BoxDecoration(
+            color: Colors.green,
+            shape: BoxShape.circle,
+          ),
+          child: const Icon(Icons.call, size: 40, color: Colors.white),
+        ),
+      ),
+    );
+  }
+}
+
+class _LibraryTab extends StatelessWidget {
+  const _LibraryTab();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(child: Text('Library'));
+  }
+}
+
+class _SettingsTab extends StatelessWidget {
+  const _SettingsTab();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(child: Text('Settings'));
   }
 }
 
