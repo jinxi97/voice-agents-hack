@@ -46,3 +46,8 @@ app.*.map.json
 
 # Local secrets
 .env.json
+
+# Cactus build artifacts — regenerate via `bash cactus/apple/build.sh`
+/ios/cactus-ios.xcframework/
+/macos/cactus-macos.xcframework/
+/android/app/src/main/jniLibs/
