@@ -49,5 +49,6 @@ app.*.map.json
 
 # Cactus build artifacts — regenerate via `bash cactus/apple/build.sh`
 /ios/cactus-ios.xcframework/
+/ios/Runner/cactus-ios.xcframework/
 /macos/cactus-macos.xcframework/
 /android/app/src/main/jniLibs/
