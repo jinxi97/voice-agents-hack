@@ -82,6 +82,12 @@ class _VideoCallTab extends StatelessWidget {
   }
 }
 
+class _ChatMessage {
+  final String text;
+  final bool isUser;
+  _ChatMessage({required this.text, required this.isUser});
+}
+
 class _LibraryTab extends StatefulWidget {
   const _LibraryTab();
 
@@ -91,8 +97,10 @@ class _LibraryTab extends StatefulWidget {
 
 class _LibraryTabState extends State<_LibraryTab> {
   CactusProgress _progress = const CactusProgress(CactusStage.idle);
-  String? _response;
   String? _error;
+  final List<_ChatMessage> _messages = [];
+  final TextEditingController _inputController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
 
   bool get _busy =>
       _progress.stage == CactusStage.downloading ||
@@ -100,22 +108,27 @@ class _LibraryTabState extends State<_LibraryTab> {
       _progress.stage == CactusStage.loading ||
       _progress.stage == CactusStage.generating;
 
-  Future<void> _sayHello() async {
+  Future<void> _sendMessage(String text) async {
+    if (text.trim().isEmpty) return;
     setState(() {
       _error = null;
-      _response = null;
+      _messages.add(_ChatMessage(text: text.trim(), isUser: true));
     });
+    _inputController.clear();
+    _scrollToBottom();
+
     try {
       await CactusService.instance.init((p) {
         if (mounted) setState(() => _progress = p);
       });
       setState(() => _progress = const CactusProgress(CactusStage.generating, message: 'Generating…'));
-      final result = await CactusService.instance.complete('Hello!');
+      final result = await CactusService.instance.complete(text.trim());
       if (!mounted) return;
       setState(() {
-        _response = result;
+        _messages.add(_ChatMessage(text: result, isUser: false));
         _progress = const CactusProgress(CactusStage.ready);
       });
+      _scrollToBottom();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -123,6 +136,25 @@ class _LibraryTabState extends State<_LibraryTab> {
         _progress = const CactusProgress(CactusStage.error);
       });
     }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _inputController.dispose();
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -134,35 +166,112 @@ class _LibraryTabState extends State<_LibraryTab> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             FilledButton.icon(
-              onPressed: _busy ? null : _sayHello,
+              onPressed: _busy ? null : () => _sendMessage('Hello!'),
               icon: const Icon(Icons.waving_hand),
               label: const Text('Say hello to Gemma-4'),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
             if (_busy) ...[
               LinearProgressIndicator(
                 value: _progress.stage == CactusStage.downloading && _progress.progress > 0
                     ? _progress.progress
                     : null,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 4),
               Text(
                 '${_progress.stage.name}${_progress.message != null ? ' — ${_progress.message}' : ''}',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
-            const SizedBox(height: 16),
+            if (_error != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                _error!,
+                style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+              ),
+            ],
+            const SizedBox(height: 8),
             Expanded(
-              child: SingleChildScrollView(
-                child: SelectableText(
-                  _error ?? _response ?? 'Tap the button to download the model and send a prompt.',
-                  style: TextStyle(
-                    color: _error != null ? Colors.redAccent : null,
-                    fontFamily: 'Menlo',
-                    fontSize: 13,
+              child: _messages.isEmpty
+                  ? Center(
+                      child: Text(
+                        _busy
+                            ? 'Loading the model weights and sending the Hello message...'
+                            : 'Tap the button or type a message to start.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                        textAlign: TextAlign.center,
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scrollController,
+                      itemCount: _messages.length,
+                      itemBuilder: (context, index) {
+                        final msg = _messages[index];
+                        return Align(
+                          alignment: msg.isUser
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
+                            ),
+                            constraints: BoxConstraints(
+                              maxWidth:
+                                  MediaQuery.of(context).size.width * 0.75,
+                            ),
+                            decoration: BoxDecoration(
+                              color: msg.isUser
+                                  ? Theme.of(context).colorScheme.primary
+                                  : Theme.of(
+                                      context,
+                                    ).colorScheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: SelectableText(
+                              msg.text,
+                              style: TextStyle(
+                                color: msg.isUser
+                                    ? Theme.of(context).colorScheme.onPrimary
+                                    : null,
+                                fontFamily: 'Menlo',
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _inputController,
+                    enabled: !_busy,
+                    decoration: const InputDecoration(
+                      hintText: 'Type a message…',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                    ),
+                    onSubmitted: _busy ? null : _sendMessage,
+                    textInputAction: TextInputAction.send,
                   ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: _busy
+                      ? null
+                      : () => _sendMessage(_inputController.text),
+                  child: const Text('Send'),
+                ),
+              ],
             ),
           ],
         ),
