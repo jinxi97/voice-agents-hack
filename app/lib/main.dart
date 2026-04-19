@@ -1,11 +1,8 @@
-import 'dart:io';
-
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import 'cactus_service.dart';
+import 'call_transcriber.dart';
 
 const String appId = String.fromEnvironment('AGORA_APP_ID');
 const String token = String.fromEnvironment('AGORA_TOKEN');
@@ -85,12 +82,6 @@ class _VideoCallTab extends StatelessWidget {
   }
 }
 
-class _ChatMessage {
-  final String text;
-  final bool isUser;
-  _ChatMessage({required this.text, required this.isUser});
-}
-
 class _LibraryTab extends StatefulWidget {
   const _LibraryTab();
 
@@ -99,119 +90,29 @@ class _LibraryTab extends StatefulWidget {
 }
 
 class _LibraryTabState extends State<_LibraryTab> {
-  CactusProgress _progress = const CactusProgress(CactusStage.idle);
-  String? _error;
-  final List<_ChatMessage> _messages = [];
-  final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
-  bool get _busy =>
-      _progress.stage == CactusStage.loading ||
-      _progress.stage == CactusStage.generating;
-
-  Future<void> _transcribeWhisper() async {
-    setState(() => _error = null);
-    try {
-      final docs = await getApplicationDocumentsDirectory();
-      const filename = 'single_person_16k_mono.wav';
-      final candidates = [
-        '${docs.path}/$filename',
-        '${docs.parent.path}/$filename',
-      ];
-      final audioPath = candidates.firstWhere(
-        (p) => File(p).existsSync(),
-        orElse: () => throw Exception('Audio file not found. Tried:\n${candidates.join('\n')}'),
-      );
-      final result = await CactusService.instance.transcribeWhisper(
-        audioPath,
-        (p) { if (mounted) setState(() => _progress = p); },
-      );
-      if (!mounted) return;
-      setState(() {
-        _messages.add(_ChatMessage(text: '[Whisper] $result', isUser: false));
-        _progress = const CactusProgress(CactusStage.ready);
-      });
-      _scrollToBottom();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString();
-        _progress = const CactusProgress(CactusStage.error);
-      });
-    }
+  @override
+  void initState() {
+    super.initState();
+    CallTranscriber.instance.addListener(_onTranscriberChanged);
   }
 
-  Future<void> _transcribeAudio() async {
-    setState(() => _error = null);
-    try {
-      final docs = await getApplicationDocumentsDirectory();
-      const filename = 'single_person_16k_mono.wav';
-      final candidates = [
-        '${docs.path}/$filename',
-        '${docs.parent.path}/$filename',
-      ];
-      final audioPath = candidates.firstWhere(
-        (p) => File(p).existsSync(),
-        orElse: () => throw Exception('Audio file not found. Tried:\n${candidates.join('\n')}'),
-      );
-      await CactusService.instance.transcribeAudioChunked(
-        audioPath,
-        (p) { if (mounted) setState(() => _progress = p); },
-        (chunk, total, text) {
-          if (!mounted) return;
-          setState(() => _messages.add(
-            _ChatMessage(text: '[Chunk $chunk/$total] $text', isUser: false),
-          ));
-          _scrollToBottom();
-        },
-      );
-      if (!mounted) return;
-      setState(() => _progress = const CactusProgress(CactusStage.ready));
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString();
-        _progress = const CactusProgress(CactusStage.error);
-      });
-    }
+  @override
+  void dispose() {
+    CallTranscriber.instance.removeListener(_onTranscriberChanged);
+    _scrollController.dispose();
+    super.dispose();
   }
 
-  Future<void> _sendMessage(String text) async {
-    if (text.trim().isEmpty) return;
-    setState(() {
-      _error = null;
-      _messages.add(_ChatMessage(text: text.trim(), isUser: true));
-    });
-    _inputController.clear();
-    _scrollToBottom();
-
-    try {
-      await CactusService.instance.init((p) {
-        if (mounted) setState(() => _progress = p);
-      });
-      setState(() => _progress = const CactusProgress(CactusStage.generating, message: 'Generating…'));
-      final result = await CactusService.instance.complete(text.trim());
-      if (!mounted) return;
-      setState(() {
-        _messages.add(_ChatMessage(text: result, isUser: false));
-        _progress = const CactusProgress(CactusStage.ready);
-      });
-      _scrollToBottom();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString();
-        _progress = const CactusProgress(CactusStage.error);
-      });
-    }
-  }
-
-  void _scrollToBottom() {
+  void _onTranscriberChanged() {
+    if (!mounted) return;
+    setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
+          duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
       }
@@ -219,135 +120,97 @@ class _LibraryTabState extends State<_LibraryTab> {
   }
 
   @override
-  void dispose() {
-    _inputController.dispose();
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final transcriber = CallTranscriber.instance;
+    final lines = transcriber.lines;
+    final status = transcriber.status;
+    final error = transcriber.error;
+
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            FilledButton.icon(
-              onPressed: _busy ? null : () => _sendMessage('Hello!'),
-              icon: const Icon(Icons.waving_hand),
-              label: const Text('Say hello to Gemma-4'),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Call Transcript',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                if (lines.isNotEmpty)
+                  TextButton.icon(
+                    onPressed: transcriber.clear,
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    label: const Text('Clear'),
+                  ),
+              ],
             ),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed: _busy ? null : _transcribeAudio,
-              icon: const Icon(Icons.mic),
-              label: const Text('Transcribe Audio'),
-            ),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed: _busy ? null : _transcribeWhisper,
-              icon: const Icon(Icons.mic_external_on),
-              label: const Text('Transcribe Audio (Whisper)'),
-            ),
-            const SizedBox(height: 8),
-            if (_busy) ...[
-              const LinearProgressIndicator(),
+            if (status != null) ...[
               const SizedBox(height: 4),
-              Text(
-                '${_progress.stage.name}${_progress.message != null ? ' — ${_progress.message}' : ''}',
-                style: Theme.of(context).textTheme.bodySmall,
+              Row(
+                children: [
+                  if (transcriber.isActive)
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  if (transcriber.isActive) const SizedBox(width: 8),
+                  Text(status, style: Theme.of(context).textTheme.bodySmall),
+                ],
               ),
             ],
-            if (_error != null) ...[
+            if (error != null) ...[
               const SizedBox(height: 4),
               Text(
-                _error!,
+                error,
                 style: const TextStyle(color: Colors.redAccent, fontSize: 13),
               ),
             ],
             const SizedBox(height: 8),
             Expanded(
-              child: _messages.isEmpty
+              child: lines.isEmpty
                   ? Center(
                       child: Text(
-                        _busy
-                            ? 'Loading the model weights and sending the Hello message...'
-                            : 'Tap the button or type a message to start.',
+                        transcriber.isActive
+                            ? 'Listening… transcript will appear here.'
+                            : 'Start a call to see the transcript.',
                         style: Theme.of(context).textTheme.bodySmall,
                         textAlign: TextAlign.center,
                       ),
                     )
                   : ListView.builder(
                       controller: _scrollController,
-                      itemCount: _messages.length,
+                      itemCount: lines.length,
                       itemBuilder: (context, index) {
-                        final msg = _messages[index];
-                        return Align(
-                          alignment: msg.isUser
-                              ? Alignment.centerRight
-                              : Alignment.centerLeft,
-                          child: Container(
-                            margin: const EdgeInsets.symmetric(vertical: 4),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 8,
-                            ),
-                            constraints: BoxConstraints(
-                              maxWidth:
-                                  MediaQuery.of(context).size.width * 0.75,
-                            ),
-                            decoration: BoxDecoration(
-                              color: msg.isUser
-                                  ? Theme.of(context).colorScheme.primary
-                                  : Theme.of(
-                                      context,
-                                    ).colorScheme.surfaceContainerHighest,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: SelectableText(
-                              msg.text,
-                              style: TextStyle(
-                                color: msg.isUser
-                                    ? Theme.of(context).colorScheme.onPrimary
-                                    : null,
-                                fontFamily: 'Menlo',
-                                fontSize: 13,
-                              ),
+                        final line = lines[index];
+                        final speaker = line.isMe ? 'Me' : 'Other';
+                        final color = line.isMe
+                            ? Theme.of(context).colorScheme.primary
+                            : Theme.of(context).colorScheme.tertiary;
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: RichText(
+                            text: TextSpan(
+                              style: Theme.of(context).textTheme.bodyMedium,
+                              children: [
+                                TextSpan(
+                                  text: '$speaker: ',
+                                  style: TextStyle(
+                                    color: color,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                TextSpan(text: line.text),
+                              ],
                             ),
                           ),
                         );
                       },
                     ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _inputController,
-                    enabled: !_busy,
-                    decoration: const InputDecoration(
-                      hintText: 'Type a message…',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                    ),
-                    onSubmitted: _busy ? null : _sendMessage,
-                    textInputAction: TextInputAction.send,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                FilledButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _sendMessage(_inputController.text),
-                  child: const Text('Send'),
-                ),
-              ],
             ),
           ],
         ),
@@ -374,6 +237,7 @@ class CallPage extends StatefulWidget {
 
 class _CallPageState extends State<CallPage> {
   late final RtcEngine _engine;
+  AudioFrameObserver? _audioObserver;
   bool _joined = false;
   int? _remoteUid;
   bool _muted = false;
@@ -410,6 +274,31 @@ class _CallPageState extends State<CallPage> {
 
     await _engine.enableVideo();
     await _engine.startPreview();
+
+    _audioObserver = AudioFrameObserver(
+      onRecordAudioFrame: (channelId, audioFrame) {
+        CallTranscriber.instance.addMyFrame(audioFrame.buffer);
+      },
+      onPlaybackAudioFrameBeforeMixing: (channelId, uid, audioFrame) {
+        CallTranscriber.instance.addOtherFrame(audioFrame.buffer);
+      },
+    );
+    _engine.getMediaEngine().registerAudioFrameObserver(_audioObserver!);
+    await _engine.setRecordingAudioFrameParameters(
+      sampleRate: CallTranscriber.sampleRate,
+      channel: CallTranscriber.channels,
+      mode: RawAudioFrameOpModeType.rawAudioFrameOpModeReadOnly,
+      samplesPerCall: 1024,
+    );
+    await _engine.setPlaybackAudioFrameBeforeMixingParameters(
+      sampleRate: CallTranscriber.sampleRate,
+      channel: CallTranscriber.channels,
+      samplesPerCall: 1024,
+    );
+    // Clear old transcript and begin capturing for this call.
+    CallTranscriber.instance.clear();
+    await CallTranscriber.instance.start();
+
     await _engine.joinChannel(
       token: token,
       channelId: channelName,
@@ -423,6 +312,10 @@ class _CallPageState extends State<CallPage> {
 
   @override
   void dispose() {
+    CallTranscriber.instance.stop();
+    if (_audioObserver != null) {
+      _engine.getMediaEngine().unregisterAudioFrameObserver(_audioObserver!);
+    }
     _engine.leaveChannel();
     _engine.release();
     super.dispose();

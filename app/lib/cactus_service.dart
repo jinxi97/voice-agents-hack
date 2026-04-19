@@ -110,7 +110,7 @@ class CactusService {
 
       final start = i * bytesPerChunk;
       final end = (start + bytesPerChunk).clamp(0, pcm.length);
-      final chunkWav = _buildWav(
+      final chunkWav = buildWav(
         Uint8List.sublistView(pcm, start, end),
         sampleRate,
         channels,
@@ -139,7 +139,7 @@ class CactusService {
     }
   }
 
-  static Uint8List _buildWav(
+  static Uint8List buildWav(
     Uint8List pcm,
     int sampleRate,
     int channels,
