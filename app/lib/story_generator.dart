@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'cactus_service.dart';
 import 'call_transcriber.dart';
@@ -24,7 +26,16 @@ class StoryGenerator {
 
     onStatus?.call('Generating story…');
     final prompt = _buildPrompt(me: me, other: other);
-    final raw = await CactusService.instance.complete(prompt);
+    final options = jsonEncode({
+      'temperature': 0.9,
+      'top_p': 0.95,
+      'top_k': 50,
+      'seed': Random().nextInt(0x7fffffff),
+    });
+    final raw = await CactusService.instance.complete(
+      prompt,
+      optionsJson: options,
+    );
     final story = raw.trim();
 
     final dir = await CallTranscriber.callsDir();
@@ -44,9 +55,9 @@ class StoryGenerator {
   }
 
   static String _buildPrompt({required String me, required String other}) {
-    return '''You are a thoughtful narrator. Below are two timestamped transcripts from a single phone call — one captured from "Me" (a kid) and one from the "Other" (the grandpa) speaker. Lines are formatted as "[mm:ss.mmm] text".
+    return '''You are a thoughtful narrator. Below are two timestamped transcripts from a single phone call — one captured from "Me" (the grandsoon) and one from the "Other" (the grandma) speaker. The grandson is asking an old story that grandma and grandpa had. Lines are formatted as "[mm:ss.mmm] text".
 
-Using both transcripts together, write a narrative story that captures what was discussed, especailly what is the story that grandpa or kid told. Capture the full story (time, location, people) and memorable parts. Write in the grandpa's first person. Do not include timestamps, speaker labels, bullet points, or headings — just the story.
+Using both transcripts together, write a narrative story that captures what was discussed, especailly what is the story that grandma told. Capture the full story (time, location, people) and memorable parts. Write in the grandma's first person. Do not include timestamps, speaker labels, bullet points, or headings — just the story. The transcription may have typos so guess the right word.
 
 Here is an example story:
 'When I was a little girl, we had a cherry tree in the backyard that your great-grandfather planted the year I was born.
@@ -54,12 +65,12 @@ Every July it would bloom with so many cherries that my mother would bake pies f
 I remember climbing up with my cousin Lila and eating until our lips were stained purple.
 That tree outlived three dogs and two moves — and every spring I still think of the smell of those blossoms.'
 
-Now please write the story based on the transcript below:
+Now please write the story based on the transcripts below:
 
 --- Me (kid) transcript ---
 $me
 
---- Other (grandpa) transcript ---
+--- Other (grandma) transcript ---
 $other
 
 Story:''';

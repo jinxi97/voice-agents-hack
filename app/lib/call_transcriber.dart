@@ -229,8 +229,11 @@ class CallTranscriber extends ChangeNotifier {
       CactusService.buildWav(otherPcm, sampleRate, channels, bitsPerSample),
     );
 
-    final myOffsetMs = _offsetMsFromCallStart(_myFirstFrameAt);
-    final otherOffsetMs = _offsetMsFromCallStart(_otherFirstFrameAt);
+    // Timestamps are anchored to "me joining" (00:00 = first frame on my mic).
+    // If me never produced audio, fall back to the call's wall-clock start.
+    final anchor = _myFirstFrameAt ?? _callStartedAt;
+    final myOffsetMs = _offsetMsFromAnchor(anchor, _myFirstFrameAt);
+    final otherOffsetMs = _offsetMsFromAnchor(anchor, _otherFirstFrameAt);
 
     _status = 'Transcribing my audio…';
     notifyListeners();
@@ -262,17 +265,16 @@ class CallTranscriber extends ChangeNotifier {
     );
   }
 
-  int _offsetMsFromCallStart(DateTime? firstFrameAt) {
-    final start = _callStartedAt;
-    if (start == null || firstFrameAt == null) return 0;
-    final diff = firstFrameAt.difference(start).inMilliseconds;
+  int _offsetMsFromAnchor(DateTime? anchor, DateTime? firstFrameAt) {
+    if (anchor == null || firstFrameAt == null) return 0;
+    final diff = firstFrameAt.difference(anchor).inMilliseconds;
     return diff < 0 ? 0 : diff;
   }
 
-  Future<List<WhisperSegment>> _safeTranscribeSegments(String path) async {
+  Future<List<TranscriptSegment>> _safeTranscribeSegments(String path) async {
     try {
       return await CactusService.instance
-          .transcribeWhisperSegments(path, (_) {});
+          .transcribeGemmaSegments(path, (_) {});
     } catch (e) {
       _error = 'Transcription failed for $path: $e';
       notifyListeners();
@@ -282,7 +284,7 @@ class CallTranscriber extends ChangeNotifier {
 
   Future<void> _writeSegmentsFile(
     String path,
-    List<WhisperSegment> segments, {
+    List<TranscriptSegment> segments, {
     int offsetMs = 0,
   }) async {
     final buf = StringBuffer();
@@ -294,8 +296,8 @@ class CallTranscriber extends ChangeNotifier {
 
   Future<void> _writeConversationFile(
     String path,
-    List<WhisperSegment> mine,
-    List<WhisperSegment> other, {
+    List<TranscriptSegment> mine,
+    List<TranscriptSegment> other, {
     int myOffsetMs = 0,
     int otherOffsetMs = 0,
   }) async {

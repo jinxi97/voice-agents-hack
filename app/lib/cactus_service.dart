@@ -16,12 +16,12 @@ class CactusProgress {
   const CactusProgress(this.stage, {this.progress = 0, this.message});
 }
 
-class WhisperSegment {
+class TranscriptSegment {
   final int startMs;
   final int endMs;
   final String text;
 
-  const WhisperSegment({
+  const TranscriptSegment({
     required this.startMs,
     required this.endMs,
     required this.text,
@@ -33,12 +33,15 @@ class CactusService {
   static final instance = CactusService._();
 
   static const _modelDirName = 'gemma-4-e4b-it-int4-apple';
-
   static const _whisperDirName = 'whisper-medium-int4-apple';
+  static const _vadDirName = 'silero-vad-int4';
+
+  // Gemma can only process <10s of audio per call on device (OOM otherwise).
+  static const double _vadMaxSpeechSec = 10.0;
 
   CactusModelT? _model;
-
   CactusModelT? _whisperModel;
+  CactusModelT? _vadModel;
 
   Future<String> _modelsRoot() async {
     final docs = await getApplicationDocumentsDirectory();
@@ -47,10 +50,8 @@ class CactusService {
 
   Future<void> init(void Function(CactusProgress) onProgress) async {
     if (_model != null) return;
-    if (_whisperModel != null) {
-      cactusDestroy(_whisperModel!);
-      _whisperModel = null;
-    }
+    _unloadWhisper();
+    _unloadVad();
     final root = await _modelsRoot();
     final modelDir = Directory('$root/$_modelDirName');
     if (!await modelDir.exists()) {
@@ -65,90 +66,33 @@ class CactusService {
     _model = cactusInit(modelDir.path, null, false);
   }
 
-  Future<String> complete(String prompt) async {
+  Future<String> complete(String prompt, {String? optionsJson}) async {
     final model = _model;
     if (model == null) throw StateError('Model not initialized');
     final messages = jsonEncode([
       {'role': 'user', 'content': prompt},
     ]);
-    return cactusComplete(model, messages, null, null, null);
+    final raw = cactusComplete(model, messages, optionsJson, null, null);
+    if (kDebugMode) {
+      // Full native result (JSON with response + metadata) streamed to the
+      // flutter console on the dev machine. On device we return just the
+      // response text below.
+      debugPrint('[cactus.complete] raw: $raw');
+    }
+    return _extractCompletionText(raw);
   }
 
-  Future<void> transcribeAudioChunked(
-    String audioPath,
-    void Function(CactusProgress) onProgress,
-    void Function(int chunk, int total, String text) onChunk, {
-    int secondsPerChunk = 10,
-  }) async {
-    await init(onProgress);
-
-    final fileBytes = await File(audioPath).readAsBytes();
-
-    // Parse WAV chunks to find fmt and data
-    int sampleRate = 16000, channels = 1, bitsPerSample = 16, dataOffset = 44;
-    var pos = 12;
-    while (pos + 8 <= fileBytes.length) {
-      final id = String.fromCharCodes(fileBytes.sublist(pos, pos + 4));
-      final size = ByteData.sublistView(
-        fileBytes,
-        pos + 4,
-        pos + 8,
-      ).getUint32(0, Endian.little);
-      if (id == 'fmt ') {
-        final bd = ByteData.sublistView(fileBytes, pos + 8);
-        channels = bd.getUint16(2, Endian.little);
-        sampleRate = bd.getUint32(4, Endian.little);
-        bitsPerSample = bd.getUint16(14, Endian.little);
-      } else if (id == 'data') {
-        dataOffset = pos + 8;
-        break;
+  static String _extractCompletionText(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        final response = decoded['response'];
+        if (response is String) return response;
       }
-      pos += 8 + size;
+    } catch (_) {
+      // Not JSON — fall through and return raw.
     }
-
-    final bytesPerChunk =
-        secondsPerChunk * sampleRate * channels * (bitsPerSample ~/ 8);
-    final pcm = Uint8List.sublistView(fileBytes, dataOffset);
-    final total = (pcm.length / bytesPerChunk).ceil().clamp(1, 9999);
-
-    final tmpDir = await getTemporaryDirectory();
-
-    for (var i = 0; i < total; i++) {
-      onProgress(CactusProgress(
-          CactusStage.generating,
-          message: 'Transcribing chunk ${i + 1}/$total…',
-        ),
-      );
-
-      final start = i * bytesPerChunk;
-      final end = (start + bytesPerChunk).clamp(0, pcm.length);
-      final chunkWav = buildWav(
-        Uint8List.sublistView(pcm, start, end),
-        sampleRate,
-        channels,
-        bitsPerSample,
-      );
-
-      final tmpPath = '${tmpDir.path}/cactus_chunk_$i.wav';
-      await File(tmpPath).writeAsBytes(chunkWav);
-
-      try {
-        final model = _model!;
-        final messages = jsonEncode([
-          {
-            'role': 'user',
-            'content': 'Please transcribe this audio accurately.',
-            'audio': [tmpPath],
-          }
-        ]);
-        final result = await Future(
-          () => cactusComplete(model, messages, null, null, null),
-        );
-        onChunk(i + 1, total, result.trim());
-      } finally {
-        await File(tmpPath).delete().catchError((Object _) => File(tmpPath));
-      }
-    }
+    return raw;
   }
 
   static Uint8List buildWav(
@@ -185,10 +129,8 @@ class CactusService {
 
   Future<void> initWhisper(void Function(CactusProgress) onProgress) async {
     if (_whisperModel != null) return;
-    if (_model != null) {
-      cactusDestroy(_model!);
-      _model = null;
-    }
+    _unloadGemma();
+    _unloadVad();
     final root = await _modelsRoot();
     final modelDir = Directory('$root/$_whisperDirName');
     if (!await modelDir.exists()) {
@@ -231,116 +173,238 @@ class CactusService {
       return segments.map((s) => (s['text'] as String).trim()).join(' ');
     }
     if (response.isNotEmpty) return response;
-    // Surface raw JSON so the caller can see what Whisper actually returned
     return '(no speech — raw: $resultJson)';
   }
 
-  /// Transcribes [audioPath] with Whisper and returns timestamped segments.
-  /// Timestamps are converted to milliseconds (whisper.cpp emits centiseconds
-  /// in `t0`/`t1`).
-  Future<List<WhisperSegment>> transcribeWhisperSegments(
+  Future<void> initVad(void Function(CactusProgress) onProgress) async {
+    if (_vadModel != null) return;
+    _unloadGemma();
+    _unloadWhisper();
+    final root = await _modelsRoot();
+    final modelDir = Directory('$root/$_vadDirName');
+    if (!await modelDir.exists()) {
+      throw Exception(
+        'VAD model not found at ${modelDir.path}\n'
+        'Place the "$_vadDirName" folder in the app Documents directory.',
+      );
+    }
+    onProgress(
+      const CactusProgress(CactusStage.loading, message: 'Loading VAD…'),
+    );
+    _vadModel = cactusInit(modelDir.path, null, false);
+  }
+
+  /// Runs VAD over [audioPath] and transcribes each speech region with Gemma.
+  /// VAD is configured to cap each region at [_vadMaxSpeechSec] so Gemma never
+  /// sees more than ~9s of audio (OOM threshold on-device).
+  Future<List<TranscriptSegment>> transcribeGemmaSegments(
     String audioPath,
     void Function(CactusProgress) onProgress,
   ) async {
-    await initWhisper(onProgress);
+    final vadRanges = await _runVad(audioPath, onProgress);
+    if (vadRanges.isEmpty) return const [];
+
+    await init(onProgress);
+
+    final fileBytes = await File(audioPath).readAsBytes();
+    final info = _parseWavHeader(fileBytes);
+    final pcm = Uint8List.sublistView(fileBytes, info.dataOffset);
+    final bytesPerSample = info.channels * (info.bitsPerSample ~/ 8);
+
+    final tmpDir = await getTemporaryDirectory();
+    final out = <TranscriptSegment>[];
+
+    for (var i = 0; i < vadRanges.length; i++) {
+      final range = vadRanges[i];
+      onProgress(CactusProgress(
+        CactusStage.generating,
+        message: 'Transcribing ${i + 1}/${vadRanges.length}…',
+      ));
+
+      final startByte =
+          (range.startMs * info.sampleRate ~/ 1000) * bytesPerSample;
+      final endByte =
+          (range.endMs * info.sampleRate ~/ 1000) * bytesPerSample;
+      final sStart = startByte.clamp(0, pcm.length);
+      final sEnd = endByte.clamp(sStart, pcm.length);
+      if (sEnd - sStart < bytesPerSample * info.sampleRate ~/ 10) continue;
+
+      final chunkWav = buildWav(
+        Uint8List.sublistView(pcm, sStart, sEnd),
+        info.sampleRate,
+        info.channels,
+        info.bitsPerSample,
+      );
+      final tmpPath =
+          '${tmpDir.path}/cactus_vad_chunk_${DateTime.now().microsecondsSinceEpoch}_$i.wav';
+      await File(tmpPath).writeAsBytes(chunkWav);
+
+      try {
+        final resultJson = await Future(
+          () => cactusTranscribe(
+            _model!,
+            tmpPath,
+            'You are transcribing a phone call spoken in English. '
+                'Output only the literal English words spoken in the audio, '
+                'verbatim, with no translation, no commentary, and no '
+                'speaker labels. If the audio contains no clearly '
+                'intelligible English speech (e.g. silence, background '
+                'noise, music, coughs, breathing, keyboard clicks, or '
+                'unintelligible sounds), output exactly: [NO_SPEECH]',
+            '{"temperature":0.0}',
+            null,
+            null,
+          ),
+        );
+        if (kDebugMode) {
+          debugPrint('[cactus.transcribe] chunk $i raw: $resultJson');
+        }
+        final decoded = jsonDecode(resultJson) as Map<String, dynamic>;
+        final text = ((decoded['response'] as String?) ?? '').trim();
+        if (_isNoiseTranscription(text)) continue;
+        out.add(TranscriptSegment(
+          startMs: range.startMs,
+          endMs: range.endMs,
+          text: text,
+        ));
+      } finally {
+        await File(tmpPath).delete().catchError((Object _) => File(tmpPath));
+      }
+    }
+    return out;
+  }
+
+  Future<List<_MsRange>> _runVad(
+    String audioPath,
+    void Function(CactusProgress) onProgress,
+  ) async {
+    await initVad(onProgress);
     onProgress(
       const CactusProgress(
         CactusStage.generating,
-        message: 'Whisper transcribing…',
+        message: 'Detecting speech…',
       ),
     );
+    final options = jsonEncode({
+      'threshold': 0.6,
+      'max_speech_duration_s': _vadMaxSpeechSec,
+      'min_silence_duration_ms': 400,
+      'speech_pad_ms': 100,
+    });
     final resultJson = await Future(
-      () => cactusTranscribe(
-        _whisperModel!,
-        audioPath,
-        '<|startoftranscript|><|en|><|transcribe|>',
-        '{"temperature":0.0,"no_timestamps":false,'
-            '"token_timestamps":true,"max_len":60,"split_on_word":true,'
-            '"cloud_handoff":false}',
-        null,
-        null,
-      ),
+      () => cactusVad(_vadModel!, audioPath, options, null),
     );
     if (kDebugMode) {
-      // Useful when timestamps look wrong — confirm what cactus actually sent.
-      // ignore: avoid_print
-      print('whisper segments raw: $resultJson');
+      debugPrint('[cactus.vad] raw: $resultJson');
     }
     final decoded = jsonDecode(resultJson) as Map<String, dynamic>;
-    final segments = decoded['segments'] as List? ?? [];
-    final out = <WhisperSegment>[];
-    for (final raw in segments) {
-      final s = raw as Map<String, dynamic>;
-      final text = ((s['text'] as String?) ?? '').trim();
-      if (text.isEmpty) continue;
-      final t0 = _readSegmentMs(s, const ['t0', 'start_ms', 'startMs', 'start']);
-      final t1 = _readSegmentMs(s, const ['t1', 'end_ms', 'endMs', 'end']) ?? t0;
-      out.addAll(_splitSegmentOnSentences(WhisperSegment(
-        startMs: t0 ?? 0,
-        endMs: t1 ?? (t0 ?? 0),
-        text: text,
-      )));
-    }
-    return out;
+    final segments = (decoded['segments'] as List? ?? []);
+    // VAD resamples to 16kHz internally and returns sample indices at that rate.
+    const vadRate = 16000;
+    return [
+      for (final raw in segments)
+        if (raw is Map<String, dynamic>)
+          _MsRange(
+            startMs: ((raw['start'] as num).toInt() * 1000 / vadRate).round(),
+            endMs: ((raw['end'] as num).toInt() * 1000 / vadRate).round(),
+          ),
+    ];
   }
 
-  /// Splits a single Whisper segment on sentence-ending punctuation, dividing
-  /// the segment's time window proportionally by character count.
-  ///
-  /// Whisper's cloud path tends to return one big segment per utterance even
-  /// when there are clear sentence boundaries / pauses, so we split here to
-  /// get usable per-sentence timestamps.
-  static List<WhisperSegment> _splitSegmentOnSentences(WhisperSegment seg) {
-    final pieces = <String>[];
-    final matches = RegExp(r'[^.!?]+[.!?]+|\S[^.!?]*$').allMatches(seg.text);
-    for (final m in matches) {
-      final p = m.group(0)!.trim();
-      if (p.isNotEmpty) pieces.add(p);
-    }
-    if (pieces.length <= 1) return [seg];
-    final totalChars = pieces.fold<int>(0, (a, b) => a + b.length);
-    final duration = seg.endMs - seg.startMs;
-    final out = <WhisperSegment>[];
-    var charsSoFar = 0;
-    for (final p in pieces) {
-      final startMs = totalChars == 0
-          ? seg.startMs
-          : seg.startMs + (charsSoFar * duration / totalChars).round();
-      charsSoFar += p.length;
-      final endMs = totalChars == 0
-          ? seg.endMs
-          : seg.startMs + (charsSoFar * duration / totalChars).round();
-      out.add(WhisperSegment(startMs: startMs, endMs: endMs, text: p));
-    }
-    return out;
+  static bool _isNoiseTranscription(String text) {
+    if (text.isEmpty) return true;
+    final normalized = text
+        .toLowerCase()
+        .replaceAll(RegExp(r'[\s\p{P}]+', unicode: true), '');
+    if (normalized.isEmpty) return true;
+    const noiseMarkers = {
+      'nospeech',
+      'noaudio',
+      'silence',
+      'inaudible',
+      'unintelligible',
+      'noise',
+      'backgroundnoise',
+      'music',
+    };
+    if (noiseMarkers.contains(normalized)) return true;
+    // Gemma sometimes wraps the sentinel, e.g. "[NO_SPEECH]." or "(no speech)".
+    if (normalized.contains('nospeech')) return true;
+    return false;
   }
 
-  /// Reads the first present timestamp field and returns it in milliseconds.
-  /// Treats values < 1000 as seconds (whisper "start"/"end" floats), values
-  /// in [1000, 100000) as centiseconds (whisper.cpp `t0`/`t1`), and larger
-  /// values as already-in-ms.
-  static int? _readSegmentMs(Map<String, dynamic> seg, List<String> keys) {
-    for (final k in keys) {
-      final v = seg[k];
-      if (v is num) {
-        final d = v.toDouble();
-        if (k == 'start' || k == 'end') return (d * 1000).round();
-        if (d < 100000) return (d * 10).round(); // centiseconds → ms
-        return d.round();
+  static _WavInfo _parseWavHeader(Uint8List bytes) {
+    int sampleRate = 16000, channels = 1, bitsPerSample = 16, dataOffset = 44;
+    var pos = 12;
+    while (pos + 8 <= bytes.length) {
+      final id = String.fromCharCodes(bytes.sublist(pos, pos + 4));
+      final size = ByteData.sublistView(
+        bytes,
+        pos + 4,
+        pos + 8,
+      ).getUint32(0, Endian.little);
+      if (id == 'fmt ') {
+        final bd = ByteData.sublistView(bytes, pos + 8);
+        channels = bd.getUint16(2, Endian.little);
+        sampleRate = bd.getUint32(4, Endian.little);
+        bitsPerSample = bd.getUint16(14, Endian.little);
+      } else if (id == 'data') {
+        dataOffset = pos + 8;
+        break;
       }
+      pos += 8 + size;
     }
-    return null;
+    return _WavInfo(
+      sampleRate: sampleRate,
+      channels: channels,
+      bitsPerSample: bitsPerSample,
+      dataOffset: dataOffset,
+    );
   }
 
-  void dispose() {
+  void _unloadGemma() {
     if (_model != null) {
       cactusDestroy(_model!);
       _model = null;
     }
+  }
+
+  void _unloadWhisper() {
     if (_whisperModel != null) {
       cactusDestroy(_whisperModel!);
       _whisperModel = null;
     }
   }
 
+  void _unloadVad() {
+    if (_vadModel != null) {
+      cactusDestroy(_vadModel!);
+      _vadModel = null;
+    }
+  }
+
+  void dispose() {
+    _unloadGemma();
+    _unloadWhisper();
+    _unloadVad();
+  }
+}
+
+class _MsRange {
+  final int startMs;
+  final int endMs;
+  const _MsRange({required this.startMs, required this.endMs});
+}
+
+class _WavInfo {
+  final int sampleRate;
+  final int channels;
+  final int bitsPerSample;
+  final int dataOffset;
+  const _WavInfo({
+    required this.sampleRate,
+    required this.channels,
+    required this.bitsPerSample,
+    required this.dataOffset,
+  });
 }
