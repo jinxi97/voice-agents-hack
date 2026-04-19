@@ -26,6 +26,7 @@ class SavedCall {
   final File? myTranscript;
   final File? otherTranscript;
   final File? conversation;
+  final File? story;
 
   const SavedCall({
     required this.startedAt,
@@ -35,7 +36,19 @@ class SavedCall {
     this.myTranscript,
     this.otherTranscript,
     this.conversation,
+    this.story,
   });
+
+  SavedCall copyWith({File? story}) => SavedCall(
+        startedAt: startedAt,
+        slug: slug,
+        myWav: myWav,
+        otherWav: otherWav,
+        myTranscript: myTranscript,
+        otherTranscript: otherTranscript,
+        conversation: conversation,
+        story: story ?? this.story,
+      );
 }
 
 class CallTranscriber extends ChangeNotifier {
@@ -332,6 +345,8 @@ class CallTranscriber extends ChangeNotifier {
           files.otherTranscript = entry;
         case 'conversation.txt':
           files.conversation = entry;
+        case 'story.txt':
+          files.story = entry;
       }
     }
 
@@ -348,6 +363,7 @@ class CallTranscriber extends ChangeNotifier {
         myTranscript: f.myTranscript,
         otherTranscript: f.otherTranscript,
         conversation: f.conversation,
+        story: f.story,
       ));
     });
     result.sort((a, b) => b.startedAt.compareTo(a.startedAt));
@@ -402,8 +418,9 @@ class _CallFiles {
   File? myTranscript;
   File? otherTranscript;
   File? conversation;
+  File? story;
 }
 
 final RegExp _callFilePattern = RegExp(
-  r'^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})_(me\.wav|other\.wav|me\.txt|other\.txt|conversation\.txt)$',
+  r'^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})_(me\.wav|other\.wav|me\.txt|other\.txt|conversation\.txt|story\.txt)$',
 );

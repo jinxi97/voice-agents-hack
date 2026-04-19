@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'call_transcriber.dart';
 import 'library_tab.dart';
+import 'story_generator.dart';
 
 const String appId = String.fromEnvironment('AGORA_APP_ID');
 const String token = String.fromEnvironment('AGORA_TOKEN');
@@ -244,13 +245,31 @@ String _formatStarted(DateTime t) {
       '${two(l.hour)}:${two(l.minute)}:${two(l.second)}';
 }
 
-class _SavedCallPage extends StatelessWidget {
+class _SavedCallPage extends StatefulWidget {
   final SavedCall call;
   const _SavedCallPage({required this.call});
 
+  @override
+  State<_SavedCallPage> createState() => _SavedCallPageState();
+}
+
+class _SavedCallPageState extends State<_SavedCallPage> {
+  late SavedCall _call;
+  late Future<_CallTexts> _textsFuture;
+  bool _generating = false;
+  String? _generateStatus;
+  String? _generateError;
+
+  @override
+  void initState() {
+    super.initState();
+    _call = widget.call;
+    _textsFuture = _load();
+  }
+
   Future<_CallTexts> _load() async {
-    Future<String> read(File? f) async {
-      if (f == null) return '(missing)';
+    Future<String> read(File? f, {String missing = '(missing)'}) async {
+      if (f == null) return missing;
       try {
         final s = await f.readAsString();
         return s.isEmpty ? '(empty)' : s;
@@ -260,21 +279,55 @@ class _SavedCallPage extends StatelessWidget {
     }
 
     return _CallTexts(
-      me: await read(call.myTranscript),
-      other: await read(call.otherTranscript),
-      conversation: await read(call.conversation),
+      me: await read(_call.myTranscript),
+      other: await read(_call.otherTranscript),
+      conversation: await read(_call.conversation),
+      story: await read(_call.story, missing: '(no story yet — tap Generate)'),
     );
+  }
+
+  Future<void> _generateStory() async {
+    if (_generating) return;
+    setState(() {
+      _generating = true;
+      _generateError = null;
+      _generateStatus = 'Starting…';
+    });
+    try {
+      final file = await StoryGenerator.instance.generate(
+        _call,
+        onStatus: (s) {
+          if (!mounted) return;
+          setState(() => _generateStatus = s);
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _call = _call.copyWith(story: file);
+        _textsFuture = _load();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _generateError = '$e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _generating = false;
+          _generateStatus = null;
+        });
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(_formatStarted(call.startedAt))),
+      appBar: AppBar(title: Text(_formatStarted(_call.startedAt))),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
           child: FutureBuilder<_CallTexts>(
-            future: _load(),
+            future: _textsFuture,
             builder: (context, snapshot) {
               if (snapshot.connectionState != ConnectionState.done) {
                 return const Center(child: CircularProgressIndicator());
@@ -282,7 +335,16 @@ class _SavedCallPage extends StatelessWidget {
               final texts = snapshot.data!;
               return ListView(
                 children: [
-                  _FilesRow(call: call),
+                  _FilesRow(call: _call),
+                  const SizedBox(height: 16),
+                  _StorySection(
+                    body: texts.story,
+                    hasStory: _call.story != null,
+                    generating: _generating,
+                    status: _generateStatus,
+                    error: _generateError,
+                    onGenerate: _generateStory,
+                  ),
                   const SizedBox(height: 16),
                   _TextSection(title: 'Conversation', body: texts.conversation),
                   const SizedBox(height: 16),
@@ -303,11 +365,88 @@ class _CallTexts {
   final String me;
   final String other;
   final String conversation;
+  final String story;
   const _CallTexts({
     required this.me,
     required this.other,
     required this.conversation,
+    required this.story,
   });
+}
+
+class _StorySection extends StatelessWidget {
+  final String body;
+  final bool hasStory;
+  final bool generating;
+  final String? status;
+  final String? error;
+  final VoidCallback onGenerate;
+
+  const _StorySection({
+    required this.body,
+    required this.hasStory,
+    required this.generating,
+    required this.status,
+    required this.error,
+    required this.onGenerate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text('Story', style: theme.textTheme.titleSmall),
+            ),
+            FilledButton.icon(
+              onPressed: generating ? null : onGenerate,
+              icon: generating
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.auto_stories, size: 18),
+              label: Text(
+                generating
+                    ? 'Generating…'
+                    : hasStory
+                        ? 'Regenerate'
+                        : 'Generate',
+              ),
+            ),
+          ],
+        ),
+        if (generating && status != null) ...[
+          const SizedBox(height: 4),
+          Text(status!, style: theme.textTheme.bodySmall),
+        ],
+        if (error != null) ...[
+          const SizedBox(height: 4),
+          Text(
+            error!,
+            style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+          ),
+        ],
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: SelectableText(
+            body,
+            style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _TextSection extends StatelessWidget {
@@ -358,6 +497,7 @@ class _FilesRow extends StatelessWidget {
         Text('me.txt: ${name(call.myTranscript)}', style: style),
         Text('other.txt: ${name(call.otherTranscript)}', style: style),
         Text('conversation: ${name(call.conversation)}', style: style),
+        Text('story: ${name(call.story)}', style: style),
       ],
     );
   }
