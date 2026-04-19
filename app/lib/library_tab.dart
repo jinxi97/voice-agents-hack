@@ -26,44 +26,70 @@ class Story {
   });
 }
 
-final List<Story> _stories = [
-  Story(
-    id: '1',
-    title: 'The Cherry Tree in the Backyard',
-    subtitle: 'Grandma, summer 1962',
-    text:
-        'When I was a little girl, we had a cherry tree in the backyard that your '
-        'great-grandfather planted the year I was born. Every July it would bloom '
-        'with so many cherries that my mother would bake pies for the whole street. '
-        'I remember climbing up with my cousin Lila and eating until our lips were '
-        'stained purple. That tree outlived three dogs and two moves — and every '
-        'spring I still think of the smell of those blossoms.',
-  ),
-  Story(
-    id: '2',
-    title: 'How I Met Your Grandfather',
-    subtitle: 'Grandma, autumn 1968',
-    text:
-        'It was at a dance hall on the corner of 4th and Main. I was wearing a '
-        'yellow dress that my sister had sewn for me, and I was certain I was the '
-        'tallest girl in the room. Your grandfather came over — he was terrible at '
-        'dancing, truly awful — but he made me laugh so hard I forgot to be '
-        'embarrassed. He walked me home afterward in the rain and I remember '
-        'thinking, this is the one I\'m going to marry. And three years later, I did.',
-  ),
-  Story(
-    id: '3',
-    title: 'The Long Winter of \'78',
-    subtitle: 'Grandma, winter 1978',
-    text:
-        'The snow came down for four days straight. Your mother was only six and '
-        'she thought it was the most magical thing in the world. We ran out of milk '
-        'and bread by the second day, and the roads were completely impassable. Mr. '
-        'Henderson from down the road came by on his tractor with a crate of '
-        'supplies for every family on the block. I never forgot that kindness. That '
-        'was the kind of neighborhood we had then.',
-  ),
-];
+class StoryStore extends ChangeNotifier {
+  StoryStore._();
+  static final StoryStore instance = StoryStore._();
+
+  final List<Story> _stories = [
+    Story(
+      id: '1',
+      title: 'The Cherry Tree in the Backyard',
+      subtitle: 'Grandma, summer 1962',
+      text:
+          'When I was a little girl, we had a cherry tree in the backyard that your '
+          'great-grandfather planted the year I was born. Every July it would bloom '
+          'with so many cherries that my mother would bake pies for the whole street. '
+          'I remember climbing up with my cousin Lila and eating until our lips were '
+          'stained purple. That tree outlived three dogs and two moves — and every '
+          'spring I still think of the smell of those blossoms.',
+    ),
+    Story(
+      id: '2',
+      title: 'How I Met Your Grandfather',
+      subtitle: 'Grandma, autumn 1968',
+      text:
+          'It was at a dance hall on the corner of 4th and Main. I was wearing a '
+          'yellow dress that my sister had sewn for me, and I was certain I was the '
+          'tallest girl in the room. Your grandfather came over — he was terrible at '
+          'dancing, truly awful — but he made me laugh so hard I forgot to be '
+          'embarrassed. He walked me home afterward in the rain and I remember '
+          'thinking, this is the one I\'m going to marry. And three years later, I did.',
+    ),
+    Story(
+      id: '3',
+      title: 'The Long Winter of \'78',
+      subtitle: 'Grandma, winter 1978',
+      text:
+          'The snow came down for four days straight. Your mother was only six and '
+          'she thought it was the most magical thing in the world. We ran out of milk '
+          'and bread by the second day, and the roads were completely impassable. Mr. '
+          'Henderson from down the road came by on his tractor with a crate of '
+          'supplies for every family on the block. I never forgot that kindness. That '
+          'was the kind of neighborhood we had then.',
+    ),
+  ];
+
+  List<Story> get stories => List.unmodifiable(_stories);
+
+  Story add({required String title, required String subtitle, required String text}) {
+    final story = Story(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      title: title,
+      subtitle: subtitle,
+      text: text,
+    );
+    _stories.add(story);
+    notifyListeners();
+    return story;
+  }
+
+  void remove(String id) {
+    _stories.removeWhere((s) => s.id == id);
+    notifyListeners();
+  }
+
+  void touch() => notifyListeners();
+}
 
 class LibraryTab extends StatefulWidget {
   const LibraryTab({super.key});
@@ -110,8 +136,9 @@ class _LibraryTabState extends State<LibraryTab> {
       'Stories:\n',
     );
 
-    for (var i = 0; i < _stories.length; i++) {
-      final s = _stories[i];
+    final stories = StoryStore.instance.stories;
+    for (var i = 0; i < stories.length; i++) {
+      final s = stories[i];
       buf.writeln('--- Story ${i + 1} ---');
       buf.writeln('Title: ${s.title}');
       buf.writeln('Byline: ${s.subtitle}');
@@ -163,6 +190,26 @@ class _LibraryTabState extends State<LibraryTab> {
       artifact.error = e.toString();
       ArtifactStore.instance.touch();
     }
+  }
+
+  Future<bool?> _confirmDelete(BuildContext context, Story story) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete story?'),
+        content: Text('"${story.title}" will be removed from your Library.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _openArtifact(Artifact a) {
@@ -271,33 +318,70 @@ class _LibraryTabState extends State<LibraryTab> {
             },
           ),
           Expanded(
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: _stories.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 4),
-              itemBuilder: (context, i) {
-                final story = _stories[i];
-                return Card(
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundImage:
-                          story.photo != null ? FileImage(story.photo!) : null,
-                      child: story.photo == null
-                          ? const Icon(Icons.auto_stories)
-                          : null,
-                    ),
-                    title: Text(story.title),
-                    subtitle: Text(story.subtitle),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () async {
-                      await Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => StoryPage(story: story),
+            child: ListenableBuilder(
+              listenable: StoryStore.instance,
+              builder: (context, _) {
+                final stories = StoryStore.instance.stories;
+                return ListView.separated(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  itemCount: stories.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 4),
+                  itemBuilder: (context, i) {
+                    final story = stories[i];
+                    return Dismissible(
+                      key: ValueKey(story.id),
+                      direction: DismissDirection.endToStart,
+                      background: Container(
+                        alignment: Alignment.centerRight,
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        color: Colors.red,
+                        child: const Icon(Icons.delete, color: Colors.white),
+                      ),
+                      confirmDismiss: (_) => _confirmDelete(context, story),
+                      onDismissed: (_) => StoryStore.instance.remove(story.id),
+                      child: Card(
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            backgroundImage:
+                                story.photo != null ? FileImage(story.photo!) : null,
+                            child: story.photo == null
+                                ? const Icon(Icons.auto_stories)
+                                : null,
+                          ),
+                          title: Text(story.title),
+                          subtitle: Text(story.subtitle),
+                          trailing: PopupMenuButton<String>(
+                            onSelected: (v) async {
+                              if (v == 'delete') {
+                                final ok = await _confirmDelete(context, story);
+                                if (ok == true) {
+                                  StoryStore.instance.remove(story.id);
+                                }
+                              }
+                            },
+                            itemBuilder: (_) => const [
+                              PopupMenuItem(
+                                value: 'delete',
+                                child: ListTile(
+                                  leading: Icon(Icons.delete_outline),
+                                  title: Text('Delete'),
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                              ),
+                            ],
+                          ),
+                          onTap: () async {
+                            await Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => StoryPage(story: story),
+                              ),
+                            );
+                            if (mounted) setState(() {});
+                          },
                         ),
-                      );
-                      if (mounted) setState(() {});
-                    },
-                  ),
+                      ),
+                    );
+                  },
                 );
               },
             ),

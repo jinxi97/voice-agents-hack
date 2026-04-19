@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
@@ -55,7 +56,7 @@ class _HomeScreenState extends State<HomeScreen> {
         onDestinationSelected: (i) => setState(() => _index = i),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.videocam), label: 'Video Call'),
-          NavigationDestination(icon: Icon(Icons.bug_report), label: 'Debug'),
+          NavigationDestination(icon: Icon(Icons.history), label: 'Recents'),
           NavigationDestination(icon: Icon(Icons.library_books), label: 'Library'),
           NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
         ],
@@ -286,6 +287,39 @@ class _SavedCallPageState extends State<_SavedCallPage> {
     );
   }
 
+  void _addToLibrary(String body) {
+    final text = _extractResponse(body).trim();
+    if (text.isEmpty) return;
+    final firstLine = text.split('\n').firstWhere(
+          (l) => l.trim().isNotEmpty,
+          orElse: () => 'Story from a saved call',
+        );
+    final title = firstLine.length > 60
+        ? '${firstLine.substring(0, 57).trimRight()}…'
+        : firstLine;
+    StoryStore.instance.add(
+      title: title,
+      subtitle: 'From a call on ${_formatStarted(_call.startedAt)}',
+      text: text,
+    );
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Added to your Library stories')),
+    );
+  }
+
+  static String _extractResponse(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        final response = decoded['response'];
+        if (response is String) return response;
+      }
+    } catch (_) {
+      // Not JSON — treat as plain text.
+    }
+    return raw;
+  }
+
   Future<void> _generateStory() async {
     if (_generating) return;
     setState(() {
@@ -344,6 +378,9 @@ class _SavedCallPageState extends State<_SavedCallPage> {
                     status: _generateStatus,
                     error: _generateError,
                     onGenerate: _generateStory,
+                    onAddToStory: _call.story != null
+                        ? () => _addToLibrary(texts.story)
+                        : null,
                   ),
                   const SizedBox(height: 16),
                   _TextSection(title: 'Conversation', body: texts.conversation),
@@ -381,6 +418,7 @@ class _StorySection extends StatelessWidget {
   final String? status;
   final String? error;
   final VoidCallback onGenerate;
+  final VoidCallback? onAddToStory;
 
   const _StorySection({
     required this.body,
@@ -389,6 +427,7 @@ class _StorySection extends StatelessWidget {
     required this.status,
     required this.error,
     required this.onGenerate,
+    required this.onAddToStory,
   });
 
   @override
@@ -397,11 +436,12 @@ class _StorySection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
+        Text('Story', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
           children: [
-            Expanded(
-              child: Text('Story', style: theme.textTheme.titleSmall),
-            ),
             FilledButton.icon(
               onPressed: generating ? null : onGenerate,
               icon: generating
@@ -418,6 +458,11 @@ class _StorySection extends StatelessWidget {
                         ? 'Regenerate'
                         : 'Generate',
               ),
+            ),
+            OutlinedButton.icon(
+              onPressed: (generating || onAddToStory == null) ? null : onAddToStory,
+              icon: const Icon(Icons.library_add, size: 18),
+              label: const Text('Add to Story'),
             ),
           ],
         ),
