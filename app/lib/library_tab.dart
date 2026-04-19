@@ -66,6 +66,18 @@ class LibraryTab extends StatefulWidget {
 }
 
 class _LibraryTabState extends State<LibraryTab> {
+  void _generateInteractiveBook() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Generate interactive book — not wired up yet')),
+    );
+  }
+
+  void _generatePdf() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Generate printable PDF — not wired up yet')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return SafeArea(
@@ -86,6 +98,28 @@ class _LibraryTabState extends State<LibraryTab> {
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: _generateInteractiveBook,
+                    icon: const Icon(Icons.menu_book),
+                    label: const Text('Interactive book'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    onPressed: _generatePdf,
+                    icon: const Icon(Icons.picture_as_pdf),
+                    label: const Text('Printable PDF'),
+                  ),
+                ),
+              ],
             ),
           ),
           Expanded(
