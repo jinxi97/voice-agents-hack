@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'artifact.dart';
+import 'artifact_progress_page.dart';
 import 'gemini_service.dart';
 import 'interactive_book_page.dart';
 
@@ -71,14 +73,6 @@ class LibraryTab extends StatefulWidget {
 }
 
 class _LibraryTabState extends State<LibraryTab> {
-  bool _generating = false;
-  final ValueNotifier<String> _streamText = ValueNotifier('');
-
-  @override
-  void dispose() {
-    _streamText.dispose();
-    super.dispose();
-  }
 
   String _photoPlaceholder(int i) => '__PHOTO_${i + 1}__';
 
@@ -139,32 +133,12 @@ class _LibraryTabState extends State<LibraryTab> {
     return (prompt: buf.toString(), images: images, replacements: replacements);
   }
 
-  Future<void> _generateInteractiveBook() async {
-    if (_generating) return;
-    setState(() => _generating = true);
-    _streamText.value = '';
+  void _startInteractiveBook() {
+    final artifact = ArtifactStore.instance.create(ArtifactKind.interactiveBook);
+    unawaited(_runInteractiveBook(artifact));
+  }
 
-    final scrollController = ScrollController();
-    var dialogOpen = true;
-    void closeDialog() {
-      if (dialogOpen && mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-        dialogOpen = false;
-      }
-    }
-
-    // Fire-and-forget: the dialog future resolves when we pop it.
-    unawaited(
-      showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => _StreamingDialog(
-          textNotifier: _streamText,
-          scrollController: scrollController,
-        ),
-      ).then((_) => dialogOpen = false),
-    );
-
+  Future<void> _runInteractiveBook(Artifact artifact) async {
     try {
       final request = await _buildBookRequest();
       final sink = StringBuffer();
@@ -173,37 +147,60 @@ class _LibraryTabState extends State<LibraryTab> {
         images: request.images,
       )) {
         sink.write(chunk);
-        _streamText.value = sink.toString();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (scrollController.hasClients) {
-            scrollController.jumpTo(scrollController.position.maxScrollExtent);
-          }
-        });
+        artifact.chunksReceived += 1;
+        artifact.partialText = sink.toString();
+        ArtifactStore.instance.touch();
       }
-      if (!mounted) return;
-      closeDialog();
       var html = stripCodeFence(sink.toString());
       request.replacements.forEach((placeholder, dataUrl) {
         html = html.replaceAll(placeholder, dataUrl);
       });
-      await Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => InteractiveBookPage(html: html)),
-      );
+      artifact.htmlContent = html;
+      artifact.status = ArtifactStatus.ready;
+      ArtifactStore.instance.touch();
     } catch (e) {
-      closeDialog();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Generation failed: $e')),
-      );
-    } finally {
-      if (mounted) setState(() => _generating = false);
+      artifact.status = ArtifactStatus.failed;
+      artifact.error = e.toString();
+      ArtifactStore.instance.touch();
     }
   }
 
-  void _generatePdf() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Generate printable PDF — not wired up yet')),
-    );
+  void _openArtifact(Artifact a) {
+    switch (a.status) {
+      case ArtifactStatus.ready:
+        if (a.htmlContent != null) {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => InteractiveBookPage(html: a.htmlContent!),
+            ),
+          );
+        }
+        break;
+      case ArtifactStatus.failed:
+        showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Generation failed'),
+            content: SingleChildScrollView(
+              child: Text(a.error ?? 'Unknown error'),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
+        );
+        break;
+      case ArtifactStatus.generating:
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => ArtifactProgressPage(artifact: a),
+          ),
+        );
+        break;
+    }
   }
 
   @override
@@ -230,34 +227,48 @@ class _LibraryTabState extends State<LibraryTab> {
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _generating ? null : _generateInteractiveBook,
-                    icon: _generating
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.menu_book),
-                    label: Text(_generating ? 'Generating…' : 'Interactive book'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    onPressed: _generatePdf,
-                    icon: const Icon(Icons.picture_as_pdf),
-                    label: const Text('Printable PDF'),
-                  ),
-                ),
-              ],
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _startInteractiveBook,
+                icon: const Icon(Icons.menu_book),
+                label: const Text('Generate interactive book'),
+              ),
             ),
+          ),
+          ListenableBuilder(
+            listenable: ArtifactStore.instance,
+            builder: (context, _) {
+              final artifacts = ArtifactStore.instance.artifacts;
+              if (artifacts.isEmpty) return const SizedBox.shrink();
+              return Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Artifacts',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 110,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: artifacts.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 12),
+                        itemBuilder: (_, i) => _ArtifactCard(
+                          artifact: artifacts[i],
+                          onTap: () => _openArtifact(artifacts[i]),
+                          onDismiss: () =>
+                              ArtifactStore.instance.remove(artifacts[i].id),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
           Expanded(
             child: ListView.separated(
@@ -297,54 +308,126 @@ class _LibraryTabState extends State<LibraryTab> {
   }
 }
 
-class _StreamingDialog extends StatelessWidget {
-  final ValueNotifier<String> textNotifier;
-  final ScrollController scrollController;
-  const _StreamingDialog({
-    required this.textNotifier,
-    required this.scrollController,
+class _ArtifactCard extends StatelessWidget {
+  final Artifact artifact;
+  final VoidCallback onTap;
+  final VoidCallback onDismiss;
+  const _ArtifactCard({
+    required this.artifact,
+    required this.onTap,
+    required this.onDismiss,
   });
+
+  IconData get _icon => Icons.menu_book;
+
+  String _formatTime(DateTime t) {
+    final diff = DateTime.now().difference(t);
+    if (diff.inSeconds < 5) return 'just now';
+    if (diff.inSeconds < 60) return '${diff.inSeconds}s ago';
+    if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
+  }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Row(
-        children: [
-          SizedBox(
-            width: 16,
-            height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-          SizedBox(width: 12),
-          Text('Writing your book…'),
-        ],
-      ),
-      content: SizedBox(
-        width: double.maxFinite,
-        height: 280,
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: ValueListenableBuilder<String>(
-            valueListenable: textNotifier,
-            builder: (_, text, __) => SingleChildScrollView(
-              controller: scrollController,
-              child: Text(
-                text.isEmpty ? 'Waiting for first token…' : text,
-                style: const TextStyle(
-                  fontFamily: 'Menlo',
-                  fontSize: 11,
-                  height: 1.3,
+    return SizedBox(
+      width: 210,
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(_icon, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        artifact.displayTitle,
+                        style: Theme.of(context).textTheme.labelLarge,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (artifact.status != ArtifactStatus.generating)
+                      InkWell(
+                        onTap: onDismiss,
+                        child: const Padding(
+                          padding: EdgeInsets.all(2),
+                          child: Icon(Icons.close, size: 16),
+                        ),
+                      ),
+                  ],
                 ),
-              ),
+                const SizedBox(height: 6),
+                Expanded(child: _statusBody(context)),
+                Text(
+                  _formatTime(artifact.createdAt),
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  Widget _statusBody(BuildContext context) {
+    switch (artifact.status) {
+      case ArtifactStatus.generating:
+        return Row(
+          children: [
+            const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Generating… ${artifact.chunksReceived} chunks',
+                style: Theme.of(context).textTheme.bodySmall,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        );
+      case ArtifactStatus.ready:
+        return Row(
+          children: [
+            Icon(Icons.check_circle, size: 16, color: Colors.green[400]),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'Ready — tap to open',
+                style: Theme.of(context).textTheme.bodySmall,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        );
+      case ArtifactStatus.failed:
+        return Row(
+          children: [
+            const Icon(Icons.error, size: 16, color: Colors.redAccent),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'Failed — tap for details',
+                style: Theme.of(context).textTheme.bodySmall,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        );
+    }
   }
 }
 

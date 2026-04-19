@@ -52,6 +52,7 @@ class GeminiService {
   Stream<String> generateTextStream(
     String prompt, {
     List<GeminiImage> images = const [],
+    Map<String, dynamic>? generationConfig,
   }) async* {
     if (_geminiApiKey.isEmpty) {
       throw Exception('GEMINI_API_KEY not set. Use --dart-define-from-file=.env.json');
@@ -75,6 +76,7 @@ class GeminiService {
         'contents': [
           {'parts': parts},
         ],
+        if (generationConfig != null) 'generationConfig': generationConfig,
       });
     final res = await http.Client().send(req);
     if (res.statusCode != 200) {
