@@ -1,3 +1,12 @@
 .DS_Store
 
 data
+
+# Model weights (download/extract locally; never commit)
+/gemma-*/
+/gemma-weights/
+/weights/
+/models/
+*.gguf
+*.cactus
+/*.zip

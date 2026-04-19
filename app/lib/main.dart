@@ -2,6 +2,8 @@ import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'cactus_service.dart';
+
 const String appId = String.fromEnvironment('AGORA_APP_ID');
 const String token = String.fromEnvironment('AGORA_TOKEN');
 const String channelName = String.fromEnvironment('AGORA_CHANNEL');
@@ -80,12 +82,92 @@ class _VideoCallTab extends StatelessWidget {
   }
 }
 
-class _LibraryTab extends StatelessWidget {
+class _LibraryTab extends StatefulWidget {
   const _LibraryTab();
 
   @override
+  State<_LibraryTab> createState() => _LibraryTabState();
+}
+
+class _LibraryTabState extends State<_LibraryTab> {
+  CactusProgress _progress = const CactusProgress(CactusStage.idle);
+  String? _response;
+  String? _error;
+
+  bool get _busy =>
+      _progress.stage == CactusStage.downloading ||
+      _progress.stage == CactusStage.extracting ||
+      _progress.stage == CactusStage.loading ||
+      _progress.stage == CactusStage.generating;
+
+  Future<void> _sayHello() async {
+    setState(() {
+      _error = null;
+      _response = null;
+    });
+    try {
+      await CactusService.instance.init((p) {
+        if (mounted) setState(() => _progress = p);
+      });
+      setState(() => _progress = const CactusProgress(CactusStage.generating, message: 'Generating…'));
+      final result = await CactusService.instance.complete('Hello!');
+      if (!mounted) return;
+      setState(() {
+        _response = result;
+        _progress = const CactusProgress(CactusStage.ready);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _progress = const CactusProgress(CactusStage.error);
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return const Center(child: Text('Library'));
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            FilledButton.icon(
+              onPressed: _busy ? null : _sayHello,
+              icon: const Icon(Icons.waving_hand),
+              label: const Text('Say hello to Gemma-4'),
+            ),
+            const SizedBox(height: 16),
+            if (_busy) ...[
+              LinearProgressIndicator(
+                value: _progress.stage == CactusStage.downloading && _progress.progress > 0
+                    ? _progress.progress
+                    : null,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${_progress.stage.name}${_progress.message != null ? ' — ${_progress.message}' : ''}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+            const SizedBox(height: 16),
+            Expanded(
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  _error ?? _response ?? 'Tap the button to download the model and send a prompt.',
+                  style: TextStyle(
+                    color: _error != null ? Colors.redAccent : null,
+                    fontFamily: 'Menlo',
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
