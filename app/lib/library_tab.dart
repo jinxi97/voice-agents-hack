@@ -1,7 +1,12 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+
+import 'gemini_service.dart';
+import 'interactive_book_page.dart';
 
 class Story {
   final String id;
@@ -66,10 +71,133 @@ class LibraryTab extends StatefulWidget {
 }
 
 class _LibraryTabState extends State<LibraryTab> {
-  void _generateInteractiveBook() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Generate interactive book — not wired up yet')),
+  bool _generating = false;
+  final ValueNotifier<String> _streamText = ValueNotifier('');
+
+  @override
+  void dispose() {
+    _streamText.dispose();
+    super.dispose();
+  }
+
+  String _photoPlaceholder(int i) => '__PHOTO_${i + 1}__';
+
+  String _mimeFromPath(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.heic')) return 'image/heic';
+    return 'image/jpeg';
+  }
+
+  Future<({String prompt, List<GeminiImage> images, Map<String, String> replacements})>
+      _buildBookRequest() async {
+    final buf = StringBuffer();
+    final images = <GeminiImage>[];
+    final replacements = <String, String>{};
+
+    buf.writeln(
+      'Create a complete, standalone, mobile-friendly interactive HTML webpage '
+      'that presents the following family stories as a beautiful digital keepsake book. '
+      'Include all CSS in a <style> tag and all JS in <script> tags — no external '
+      'resources, no CDN links. Use warm, elegant typography (system fonts). '
+      'Add interactivity: a cover page, tap/swipe to turn pages, a table of contents, '
+      'and smooth transitions.\n\n'
+      'Some stories have a photo attached (provided as inline images below, in the same '
+      'order as the stories that reference them). For each story that has a photo, embed '
+      'it in the layout using an <img> tag whose src attribute is the exact placeholder '
+      'token shown under "Photo placeholder" for that story. Use the placeholder VERBATIM '
+      '(including the underscores). Do not rename, decode, inline, or alter it — we will '
+      'substitute it after generation. You may still use the photo content to inform '
+      'captions and layout choices.\n\n'
+      'Respond with ONLY the raw HTML document, starting with <!DOCTYPE html>. '
+      'No markdown, no code fences, no commentary.\n\n'
+      'Stories:\n',
     );
+
+    for (var i = 0; i < _stories.length; i++) {
+      final s = _stories[i];
+      buf.writeln('--- Story ${i + 1} ---');
+      buf.writeln('Title: ${s.title}');
+      buf.writeln('Byline: ${s.subtitle}');
+      if (s.photo != null) {
+        final placeholder = _photoPlaceholder(i);
+        final bytes = await s.photo!.readAsBytes();
+        final mime = _mimeFromPath(s.photo!.path);
+        images.add((mimeType: mime, bytes: bytes));
+        replacements[placeholder] = 'data:$mime;base64,${base64Encode(bytes)}';
+        buf.writeln('Photo placeholder: $placeholder');
+      } else {
+        buf.writeln('Photo placeholder: (none — do not include an img tag)');
+      }
+      buf.writeln('Body:');
+      buf.writeln(s.text);
+      buf.writeln();
+    }
+
+    return (prompt: buf.toString(), images: images, replacements: replacements);
+  }
+
+  Future<void> _generateInteractiveBook() async {
+    if (_generating) return;
+    setState(() => _generating = true);
+    _streamText.value = '';
+
+    final scrollController = ScrollController();
+    var dialogOpen = true;
+    void closeDialog() {
+      if (dialogOpen && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        dialogOpen = false;
+      }
+    }
+
+    // Fire-and-forget: the dialog future resolves when we pop it.
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => _StreamingDialog(
+          textNotifier: _streamText,
+          scrollController: scrollController,
+        ),
+      ).then((_) => dialogOpen = false),
+    );
+
+    try {
+      final request = await _buildBookRequest();
+      final sink = StringBuffer();
+      await for (final chunk in GeminiService.instance.generateTextStream(
+        request.prompt,
+        images: request.images,
+      )) {
+        sink.write(chunk);
+        _streamText.value = sink.toString();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (scrollController.hasClients) {
+            scrollController.jumpTo(scrollController.position.maxScrollExtent);
+          }
+        });
+      }
+      if (!mounted) return;
+      closeDialog();
+      var html = stripCodeFence(sink.toString());
+      request.replacements.forEach((placeholder, dataUrl) {
+        html = html.replaceAll(placeholder, dataUrl);
+      });
+      await Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => InteractiveBookPage(html: html)),
+      );
+    } catch (e) {
+      closeDialog();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Generation failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _generating = false);
+    }
   }
 
   void _generatePdf() {
@@ -106,9 +234,18 @@ class _LibraryTabState extends State<LibraryTab> {
               children: [
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: _generateInteractiveBook,
-                    icon: const Icon(Icons.menu_book),
-                    label: const Text('Interactive book'),
+                    onPressed: _generating ? null : _generateInteractiveBook,
+                    icon: _generating
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.menu_book),
+                    label: Text(_generating ? 'Generating…' : 'Interactive book'),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -155,6 +292,57 @@ class _LibraryTabState extends State<LibraryTab> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _StreamingDialog extends StatelessWidget {
+  final ValueNotifier<String> textNotifier;
+  final ScrollController scrollController;
+  const _StreamingDialog({
+    required this.textNotifier,
+    required this.scrollController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Row(
+        children: [
+          SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          SizedBox(width: 12),
+          Text('Writing your book…'),
+        ],
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        height: 280,
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: ValueListenableBuilder<String>(
+            valueListenable: textNotifier,
+            builder: (_, text, __) => SingleChildScrollView(
+              controller: scrollController,
+              child: Text(
+                text.isEmpty ? 'Waiting for first token…' : text,
+                style: const TextStyle(
+                  fontFamily: 'Menlo',
+                  fontSize: 11,
+                  height: 1.3,
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
