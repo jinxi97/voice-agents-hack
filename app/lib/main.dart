@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'cactus_service.dart';
@@ -50,7 +53,7 @@ class _HomeScreenState extends State<HomeScreen> {
         onDestinationSelected: (i) => setState(() => _index = i),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.videocam), label: 'Video Call'),
-          NavigationDestination(icon: Icon(Icons.library_books), label: 'Library'),
+          NavigationDestination(icon: Icon(Icons.bug_report), label: 'Debug'),
           NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
         ],
       ),
@@ -103,10 +106,75 @@ class _LibraryTabState extends State<_LibraryTab> {
   final ScrollController _scrollController = ScrollController();
 
   bool get _busy =>
-      _progress.stage == CactusStage.downloading ||
-      _progress.stage == CactusStage.extracting ||
       _progress.stage == CactusStage.loading ||
       _progress.stage == CactusStage.generating;
+
+  Future<void> _transcribeWhisper() async {
+    setState(() => _error = null);
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      const filename = 'single_person_16k_mono.wav';
+      final candidates = [
+        '${docs.path}/$filename',
+        '${docs.parent.path}/$filename',
+      ];
+      final audioPath = candidates.firstWhere(
+        (p) => File(p).existsSync(),
+        orElse: () => throw Exception('Audio file not found. Tried:\n${candidates.join('\n')}'),
+      );
+      final result = await CactusService.instance.transcribeWhisper(
+        audioPath,
+        (p) { if (mounted) setState(() => _progress = p); },
+      );
+      if (!mounted) return;
+      setState(() {
+        _messages.add(_ChatMessage(text: '[Whisper] $result', isUser: false));
+        _progress = const CactusProgress(CactusStage.ready);
+      });
+      _scrollToBottom();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _progress = const CactusProgress(CactusStage.error);
+      });
+    }
+  }
+
+  Future<void> _transcribeAudio() async {
+    setState(() => _error = null);
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      const filename = 'single_person_16k_mono.wav';
+      final candidates = [
+        '${docs.path}/$filename',
+        '${docs.parent.path}/$filename',
+      ];
+      final audioPath = candidates.firstWhere(
+        (p) => File(p).existsSync(),
+        orElse: () => throw Exception('Audio file not found. Tried:\n${candidates.join('\n')}'),
+      );
+      await CactusService.instance.transcribeAudioChunked(
+        audioPath,
+        (p) { if (mounted) setState(() => _progress = p); },
+        (chunk, total, text) {
+          if (!mounted) return;
+          setState(() => _messages.add(
+            _ChatMessage(text: '[Chunk $chunk/$total] $text', isUser: false),
+          ));
+          _scrollToBottom();
+        },
+      );
+      if (!mounted) return;
+      setState(() => _progress = const CactusProgress(CactusStage.ready));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _progress = const CactusProgress(CactusStage.error);
+      });
+    }
+  }
 
   Future<void> _sendMessage(String text) async {
     if (text.trim().isEmpty) return;
@@ -171,12 +239,20 @@ class _LibraryTabState extends State<_LibraryTab> {
               label: const Text('Say hello to Gemma-4'),
             ),
             const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: _busy ? null : _transcribeAudio,
+              icon: const Icon(Icons.mic),
+              label: const Text('Transcribe Audio'),
+            ),
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: _busy ? null : _transcribeWhisper,
+              icon: const Icon(Icons.mic_external_on),
+              label: const Text('Transcribe Audio (Whisper)'),
+            ),
+            const SizedBox(height: 8),
             if (_busy) ...[
-              LinearProgressIndicator(
-                value: _progress.stage == CactusStage.downloading && _progress.progress > 0
-                    ? _progress.progress
-                    : null,
-              ),
+              const LinearProgressIndicator(),
               const SizedBox(height: 4),
               Text(
                 '${_progress.stage.name}${_progress.message != null ? ' — ${_progress.message}' : ''}',

@@ -1,28 +1,12 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
-import 'package:archive/archive_io.dart';
-import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import 'cactus.dart';
 
-enum CactusStage { idle, downloading, extracting, loading, ready, generating, error }
-
-class ModelAudit {
-  final int fileCount;
-  final List<String> zeroByteFiles;
-  final int totalBytes;
-
-  const ModelAudit({
-    required this.fileCount,
-    required this.zeroByteFiles,
-    required this.totalBytes,
-  });
-
-  String get totalMb => (totalBytes / 1024 / 1024).toStringAsFixed(1);
-}
+enum CactusStage { idle, loading, ready, generating, error }
 
 class CactusProgress {
   final CactusStage stage;
@@ -36,161 +20,207 @@ class CactusService {
   CactusService._();
   static final instance = CactusService._();
 
-  static const _modelUrl =
-      'https://huggingface.co/Cactus-Compute/gemma-4-E4B-it/resolve/main/weights/gemma-4-e4b-it-int4-apple.zip';
   static const _modelDirName = 'gemma-4-e4b-it-int4-apple';
 
+  static const _whisperDirName = 'whisper-medium-int4-apple';
+
   CactusModelT? _model;
-  String? _modelPath;
+
+  CactusModelT? _whisperModel;
 
   Future<String> _modelsRoot() async {
     final docs = await getApplicationDocumentsDirectory();
     return docs.path;
   }
 
-  Future<String> ensureModel(void Function(CactusProgress) onProgress) async {
-    if (_modelPath != null) return _modelPath!;
-
-    final root = await _modelsRoot();
-    final modelDir = Directory('$root/$_modelDirName');
-    final markerFile = File('${modelDir.path}/.ready');
-
-    if (await markerFile.exists()) {
-      _modelPath = modelDir.path;
-      return modelDir.path;
-    }
-
-    final zipFile = File('$root/$_modelDirName.zip');
-    if (!await zipFile.exists() || await zipFile.length() == 0) {
-      await _download(zipFile, onProgress);
-    }
-
-    await modelDir.create(recursive: true);
-    onProgress(const CactusProgress(CactusStage.extracting, message: 'Extracting…'));
-    await _extract(zipFile, modelDir.path, onProgress);
-    await markerFile.writeAsString('ok');
-    await zipFile.delete();
-
-    _modelPath = modelDir.path;
-    return modelDir.path;
-  }
-
-  Future<void> _download(File dest, void Function(CactusProgress) onProgress) async {
-    if (await dest.exists()) await dest.delete();
-    final req = http.Request('GET', Uri.parse(_modelUrl));
-    final resp = await http.Client().send(req);
-    if (resp.statusCode != 200) {
-      throw Exception('Download failed: HTTP ${resp.statusCode}');
-    }
-    final total = resp.contentLength ?? 0;
-    var received = 0;
-    final sink = dest.openWrite();
-    await resp.stream.listen((chunk) {
-      sink.add(chunk);
-      received += chunk.length;
-      onProgress(CactusProgress(
-        CactusStage.downloading,
-        progress: total > 0 ? received / total : 0,
-        message: '${_mb(received)} / ${_mb(total)} MB',
-      ));
-    }).asFuture<void>();
-    await sink.close();
-    final actual = await dest.length();
-    if (total > 0 && actual != total) {
-      throw Exception('Download incomplete: $actual / $total bytes');
-    }
-  }
-
-  Future<void> _extract(
-    File zipFile,
-    String outRoot,
-    void Function(CactusProgress) onProgress,
-  ) async {
-    final input = InputFileStream(zipFile.path);
-    try {
-      final archive = ZipDecoder().decodeBuffer(input);
-      final total = archive.files.length;
-      if (total == 0) {
-        throw Exception(
-            'Zip decoder returned 0 entries (zip size: ${await zipFile.length()} bytes)');
-      }
-      onProgress(CactusProgress(
-        CactusStage.extracting,
-        progress: 0,
-        message: '0 / $total files',
-      ));
-      var done = 0;
-      for (final entry in archive.files) {
-        final outPath = '$outRoot/${entry.name}';
-        if (!entry.isFile) {
-          await Directory(outPath).create(recursive: true);
-        } else {
-          await File(outPath).parent.create(recursive: true);
-          final sink = OutputFileStream(outPath, bufferSize: 65536);
-          try {
-            entry.decompress(sink);
-          } finally {
-            await sink.close();
-          }
-          entry.clear();
-        }
-        done++;
-        if (done % 50 == 0 || done == total) {
-          onProgress(CactusProgress(
-            CactusStage.extracting,
-            progress: done / total,
-            message: '$done / $total files',
-          ));
-        }
-      }
-    } finally {
-      await input.close();
-    }
-  }
-
   Future<void> init(void Function(CactusProgress) onProgress) async {
     if (_model != null) return;
-    final path = await ensureModel(onProgress);
-    final audit = await auditModelDir(path);
-    if (audit.zeroByteFiles.isNotEmpty || audit.fileCount < 2000) {
+    if (_whisperModel != null) {
+      cactusDestroy(_whisperModel!);
+      _whisperModel = null;
+    }
+    final root = await _modelsRoot();
+    final modelDir = Directory('$root/$_modelDirName');
+    if (!await modelDir.exists()) {
       throw Exception(
-          'Model dir looks wrong — ${audit.fileCount} files, ${audit.zeroByteFiles.length} zero-byte. '
-          'Total: ${audit.totalMb} MB. '
-          'First 5 zero-byte: ${audit.zeroByteFiles.take(5).join(", ")}');
+        'Gemma model not found at ${modelDir.path}\n'
+        'Place the "$_modelDirName" folder in the app Documents directory.',
+      );
     }
-    onProgress(CactusProgress(
-      CactusStage.loading,
-      message: 'Loading model… (${audit.fileCount} files, ${audit.totalMb} MB)',
-    ));
-    _model = cactusInit(path, null, false);
-  }
-
-  Future<ModelAudit> auditModelDir(String path) async {
-    final dir = Directory(path);
-    if (!await dir.exists()) {
-      return ModelAudit(fileCount: 0, zeroByteFiles: const [], totalBytes: 0);
-    }
-    final zero = <String>[];
-    var count = 0;
-    var bytes = 0;
-    await for (final entity in dir.list(recursive: true)) {
-      if (entity is File) {
-        count++;
-        final len = await entity.length();
-        bytes += len;
-        if (len == 0) zero.add(entity.path.split('/').last);
-      }
-    }
-    return ModelAudit(fileCount: count, zeroByteFiles: zero, totalBytes: bytes);
+    onProgress(
+      const CactusProgress(CactusStage.loading, message: 'Loading Gemma…'),
+    );
+    _model = cactusInit(modelDir.path, null, false);
   }
 
   Future<String> complete(String prompt) async {
     final model = _model;
     if (model == null) throw StateError('Model not initialized');
     final messages = jsonEncode([
-      {'role': 'user', 'content': prompt}
+      {'role': 'user', 'content': prompt},
     ]);
     return cactusComplete(model, messages, null, null, null);
+  }
+
+  Future<void> transcribeAudioChunked(
+    String audioPath,
+    void Function(CactusProgress) onProgress,
+    void Function(int chunk, int total, String text) onChunk, {
+    int secondsPerChunk = 10,
+  }) async {
+    await init(onProgress);
+
+    final fileBytes = await File(audioPath).readAsBytes();
+
+    // Parse WAV chunks to find fmt and data
+    int sampleRate = 16000, channels = 1, bitsPerSample = 16, dataOffset = 44;
+    var pos = 12;
+    while (pos + 8 <= fileBytes.length) {
+      final id = String.fromCharCodes(fileBytes.sublist(pos, pos + 4));
+      final size = ByteData.sublistView(
+        fileBytes,
+        pos + 4,
+        pos + 8,
+      ).getUint32(0, Endian.little);
+      if (id == 'fmt ') {
+        final bd = ByteData.sublistView(fileBytes, pos + 8);
+        channels = bd.getUint16(2, Endian.little);
+        sampleRate = bd.getUint32(4, Endian.little);
+        bitsPerSample = bd.getUint16(14, Endian.little);
+      } else if (id == 'data') {
+        dataOffset = pos + 8;
+        break;
+      }
+      pos += 8 + size;
+    }
+
+    final bytesPerChunk =
+        secondsPerChunk * sampleRate * channels * (bitsPerSample ~/ 8);
+    final pcm = Uint8List.sublistView(fileBytes, dataOffset);
+    final total = (pcm.length / bytesPerChunk).ceil().clamp(1, 9999);
+
+    final tmpDir = await getTemporaryDirectory();
+
+    for (var i = 0; i < total; i++) {
+      onProgress(CactusProgress(
+          CactusStage.generating,
+          message: 'Transcribing chunk ${i + 1}/$total…',
+        ),
+      );
+
+      final start = i * bytesPerChunk;
+      final end = (start + bytesPerChunk).clamp(0, pcm.length);
+      final chunkWav = _buildWav(
+        Uint8List.sublistView(pcm, start, end),
+        sampleRate,
+        channels,
+        bitsPerSample,
+      );
+
+      final tmpPath = '${tmpDir.path}/cactus_chunk_$i.wav';
+      await File(tmpPath).writeAsBytes(chunkWav);
+
+      try {
+        final model = _model!;
+        final messages = jsonEncode([
+          {
+            'role': 'user',
+            'content': 'Please transcribe this audio accurately.',
+            'audio': [tmpPath],
+          }
+        ]);
+        final result = await Future(
+          () => cactusComplete(model, messages, null, null, null),
+        );
+        onChunk(i + 1, total, result.trim());
+      } finally {
+        await File(tmpPath).delete().catchError((Object _) => File(tmpPath));
+      }
+    }
+  }
+
+  static Uint8List _buildWav(
+    Uint8List pcm,
+    int sampleRate,
+    int channels,
+    int bitsPerSample,
+  ) {
+    final byteRate = sampleRate * channels * bitsPerSample ~/ 8;
+    final blockAlign = channels * bitsPerSample ~/ 8;
+    final out = ByteData(44 + pcm.length);
+    void cc(int off, String s) {
+      for (var i = 0; i < 4; i++) {
+        out.setUint8(off + i, s.codeUnitAt(i));
+      }
+    }
+    cc(0, 'RIFF');
+    out.setUint32(4, 36 + pcm.length, Endian.little);
+    cc(8, 'WAVE');
+    cc(12, 'fmt ');
+    out.setUint32(16, 16, Endian.little);
+    out.setUint16(20, 1, Endian.little);
+    out.setUint16(22, channels, Endian.little);
+    out.setUint32(24, sampleRate, Endian.little);
+    out.setUint32(28, byteRate, Endian.little);
+    out.setUint16(32, blockAlign, Endian.little);
+    out.setUint16(34, bitsPerSample, Endian.little);
+    cc(36, 'data');
+    out.setUint32(40, pcm.length, Endian.little);
+    final buf = out.buffer.asUint8List();
+    buf.setRange(44, 44 + pcm.length, pcm);
+    return buf;
+  }
+
+  Future<void> initWhisper(void Function(CactusProgress) onProgress) async {
+    if (_whisperModel != null) return;
+    if (_model != null) {
+      cactusDestroy(_model!);
+      _model = null;
+    }
+    final root = await _modelsRoot();
+    final modelDir = Directory('$root/$_whisperDirName');
+    if (!await modelDir.exists()) {
+      throw Exception(
+        'Whisper model not found at ${modelDir.path}\n'
+        'Place the "$_whisperDirName" folder in the app Documents directory.',
+      );
+    }
+    onProgress(
+      const CactusProgress(CactusStage.loading, message: 'Loading Whisper…'),
+    );
+    _whisperModel = cactusInit(modelDir.path, null, false);
+  }
+
+  Future<String> transcribeWhisper(
+    String audioPath,
+    void Function(CactusProgress) onProgress,
+  ) async {
+    await initWhisper(onProgress);
+    onProgress(
+      const CactusProgress(
+        CactusStage.generating,
+        message: 'Whisper transcribing…',
+      ),
+    );
+    final resultJson = await Future(
+      () => cactusTranscribe(
+        _whisperModel!,
+        audioPath,
+        '<|startoftranscript|><|en|><|transcribe|><|notimestamps|>',
+        '{"use_vad":true,"temperature":0.0}',
+        null,
+        null,
+      ),
+    );
+    final decoded = jsonDecode(resultJson) as Map<String, dynamic>;
+    final segments = decoded['segments'] as List? ?? [];
+    final response = (decoded['response'] as String? ?? '').trim();
+    if (segments.isNotEmpty) {
+      return segments.map((s) => (s['text'] as String).trim()).join(' ');
+    }
+    if (response.isNotEmpty) return response;
+    // Surface raw JSON so the caller can see what Whisper actually returned
+    return '(no speech — raw: $resultJson)';
   }
 
   void dispose() {
@@ -198,7 +228,10 @@ class CactusService {
       cactusDestroy(_model!);
       _model = null;
     }
+    if (_whisperModel != null) {
+      cactusDestroy(_whisperModel!);
+      _whisperModel = null;
+    }
   }
 
-  static String _mb(int bytes) => (bytes / 1024 / 1024).toStringAsFixed(1);
 }
