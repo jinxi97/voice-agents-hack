@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'call_transcriber.dart';
+import 'library_tab.dart';
 
 const String appId = String.fromEnvironment('AGORA_APP_ID');
 const String token = String.fromEnvironment('AGORA_TOKEN');
@@ -38,6 +39,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static const _tabs = [
     _VideoCallTab(),
     _LibraryTab(),
+    LibraryTab(),
     _SettingsTab(),
   ];
 
@@ -51,6 +53,7 @@ class _HomeScreenState extends State<HomeScreen> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.videocam), label: 'Video Call'),
           NavigationDestination(icon: Icon(Icons.bug_report), label: 'Debug'),
+          NavigationDestination(icon: Icon(Icons.library_books), label: 'Library'),
           NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
         ],
       ),
