@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -93,7 +95,7 @@ class _LibraryTab extends StatefulWidget {
 }
 
 class _LibraryTabState extends State<_LibraryTab> {
-  final ScrollController _scrollController = ScrollController();
+  Future<List<SavedCall>> _callsFuture = CallTranscriber.listSavedCalls();
 
   @override
   void initState() {
@@ -104,28 +106,32 @@ class _LibraryTabState extends State<_LibraryTab> {
   @override
   void dispose() {
     CallTranscriber.instance.removeListener(_onTranscriberChanged);
-    _scrollController.dispose();
     super.dispose();
   }
 
   void _onTranscriberChanged() {
     if (!mounted) return;
-    setState(() {});
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
+    // When a call finishes, the transcriber clears its status; refresh the
+    // list so the new recording shows up.
+    if (!CallTranscriber.instance.isActive) {
+      setState(() {
+        _callsFuture = CallTranscriber.listSavedCalls();
+      });
+    } else {
+      setState(() {});
+    }
+  }
+
+  Future<void> _refresh() async {
+    setState(() {
+      _callsFuture = CallTranscriber.listSavedCalls();
     });
+    await _callsFuture;
   }
 
   @override
   Widget build(BuildContext context) {
     final transcriber = CallTranscriber.instance;
-    final lines = transcriber.lines;
     final status = transcriber.status;
     final error = transcriber.error;
 
@@ -139,30 +145,33 @@ class _LibraryTabState extends State<_LibraryTab> {
               children: [
                 Expanded(
                   child: Text(
-                    'Call Transcript',
+                    'Saved Calls',
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
-                if (lines.isNotEmpty)
-                  TextButton.icon(
-                    onPressed: transcriber.clear,
-                    icon: const Icon(Icons.delete_outline, size: 18),
-                    label: const Text('Clear'),
-                  ),
+                IconButton(
+                  tooltip: 'Refresh',
+                  onPressed: _refresh,
+                  icon: const Icon(Icons.refresh),
+                ),
               ],
             ),
             if (status != null) ...[
               const SizedBox(height: 4),
               Row(
                 children: [
-                  if (transcriber.isActive)
-                    const SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                  const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      status,
+                      style: Theme.of(context).textTheme.bodySmall,
                     ),
-                  if (transcriber.isActive) const SizedBox(width: 8),
-                  Text(status, style: Theme.of(context).textTheme.bodySmall),
+                  ),
                 ],
               ),
             ],
@@ -175,49 +184,181 @@ class _LibraryTabState extends State<_LibraryTab> {
             ],
             const SizedBox(height: 8),
             Expanded(
-              child: lines.isEmpty
-                  ? Center(
+              child: FutureBuilder<List<SavedCall>>(
+                future: _callsFuture,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final calls = snapshot.data ?? const [];
+                  if (calls.isEmpty) {
+                    return Center(
                       child: Text(
-                        transcriber.isActive
-                            ? 'Listening… transcript will appear here.'
-                            : 'Start a call to see the transcript.',
+                        'No saved calls yet.',
                         style: Theme.of(context).textTheme.bodySmall,
-                        textAlign: TextAlign.center,
                       ),
-                    )
-                  : ListView.builder(
-                      controller: _scrollController,
-                      itemCount: lines.length,
-                      itemBuilder: (context, index) {
-                        final line = lines[index];
-                        final speaker = line.isMe ? 'Me' : 'Other';
-                        final color = line.isMe
-                            ? Theme.of(context).colorScheme.primary
-                            : Theme.of(context).colorScheme.tertiary;
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 4),
-                          child: RichText(
-                            text: TextSpan(
-                              style: Theme.of(context).textTheme.bodyMedium,
-                              children: [
-                                TextSpan(
-                                  text: '$speaker: ',
-                                  style: TextStyle(
-                                    color: color,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                TextSpan(text: line.text),
-                              ],
+                    );
+                  }
+                  return RefreshIndicator(
+                    onRefresh: _refresh,
+                    child: ListView.separated(
+                      itemCount: calls.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 4),
+                      itemBuilder: (context, i) {
+                        final call = calls[i];
+                        return Card(
+                          child: ListTile(
+                            leading: const Icon(Icons.graphic_eq),
+                            title: Text(_formatStarted(call.startedAt)),
+                            subtitle: Text(
+                              call.conversation != null
+                                  ? 'Conversation ready'
+                                  : 'Audio saved (no transcript)',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                            trailing: const Icon(Icons.chevron_right),
+                            onTap: () => Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => _SavedCallPage(call: call),
+                              ),
                             ),
                           ),
                         );
                       },
                     ),
+                  );
+                },
+              ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+String _formatStarted(DateTime t) {
+  final l = t.toLocal();
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${l.year}-${two(l.month)}-${two(l.day)} '
+      '${two(l.hour)}:${two(l.minute)}:${two(l.second)}';
+}
+
+class _SavedCallPage extends StatelessWidget {
+  final SavedCall call;
+  const _SavedCallPage({required this.call});
+
+  Future<_CallTexts> _load() async {
+    Future<String> read(File? f) async {
+      if (f == null) return '(missing)';
+      try {
+        final s = await f.readAsString();
+        return s.isEmpty ? '(empty)' : s;
+      } catch (e) {
+        return '(failed to read: $e)';
+      }
+    }
+
+    return _CallTexts(
+      me: await read(call.myTranscript),
+      other: await read(call.otherTranscript),
+      conversation: await read(call.conversation),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(_formatStarted(call.startedAt))),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          child: FutureBuilder<_CallTexts>(
+            future: _load(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final texts = snapshot.data!;
+              return ListView(
+                children: [
+                  _FilesRow(call: call),
+                  const SizedBox(height: 16),
+                  _TextSection(title: 'Conversation', body: texts.conversation),
+                  const SizedBox(height: 16),
+                  _TextSection(title: 'Me (me.txt)', body: texts.me),
+                  const SizedBox(height: 16),
+                  _TextSection(title: 'Other (other.txt)', body: texts.other),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CallTexts {
+  final String me;
+  final String other;
+  final String conversation;
+  const _CallTexts({
+    required this.me,
+    required this.other,
+    required this.conversation,
+  });
+}
+
+class _TextSection extends StatelessWidget {
+  final String title;
+  final String body;
+  const _TextSection({required this.title, required this.body});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(title, style: theme.textTheme.titleSmall),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: SelectableText(
+            body,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              fontFamily: 'monospace',
+              height: 1.4,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FilesRow extends StatelessWidget {
+  final SavedCall call;
+  const _FilesRow({required this.call});
+
+  @override
+  Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.bodySmall;
+    String name(File? f) => f == null ? '—' : f.uri.pathSegments.last;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('me.wav: ${name(call.myWav)}', style: style),
+        Text('other.wav: ${name(call.otherWav)}', style: style),
+        Text('me.txt: ${name(call.myTranscript)}', style: style),
+        Text('other.txt: ${name(call.otherTranscript)}', style: style),
+        Text('conversation: ${name(call.conversation)}', style: style),
+      ],
     );
   }
 }

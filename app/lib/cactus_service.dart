@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'cactus.dart';
@@ -14,6 +14,18 @@ class CactusProgress {
   final String? message;
 
   const CactusProgress(this.stage, {this.progress = 0, this.message});
+}
+
+class WhisperSegment {
+  final int startMs;
+  final int endMs;
+  final String text;
+
+  const WhisperSegment({
+    required this.startMs,
+    required this.endMs,
+    required this.text,
+  });
 }
 
 class CactusService {
@@ -221,6 +233,103 @@ class CactusService {
     if (response.isNotEmpty) return response;
     // Surface raw JSON so the caller can see what Whisper actually returned
     return '(no speech — raw: $resultJson)';
+  }
+
+  /// Transcribes [audioPath] with Whisper and returns timestamped segments.
+  /// Timestamps are converted to milliseconds (whisper.cpp emits centiseconds
+  /// in `t0`/`t1`).
+  Future<List<WhisperSegment>> transcribeWhisperSegments(
+    String audioPath,
+    void Function(CactusProgress) onProgress,
+  ) async {
+    await initWhisper(onProgress);
+    onProgress(
+      const CactusProgress(
+        CactusStage.generating,
+        message: 'Whisper transcribing…',
+      ),
+    );
+    final resultJson = await Future(
+      () => cactusTranscribe(
+        _whisperModel!,
+        audioPath,
+        '<|startoftranscript|><|en|><|transcribe|>',
+        '{"temperature":0.0,"no_timestamps":false,'
+            '"token_timestamps":true,"max_len":60,"split_on_word":true,'
+            '"cloud_handoff":false}',
+        null,
+        null,
+      ),
+    );
+    if (kDebugMode) {
+      // Useful when timestamps look wrong — confirm what cactus actually sent.
+      // ignore: avoid_print
+      print('whisper segments raw: $resultJson');
+    }
+    final decoded = jsonDecode(resultJson) as Map<String, dynamic>;
+    final segments = decoded['segments'] as List? ?? [];
+    final out = <WhisperSegment>[];
+    for (final raw in segments) {
+      final s = raw as Map<String, dynamic>;
+      final text = ((s['text'] as String?) ?? '').trim();
+      if (text.isEmpty) continue;
+      final t0 = _readSegmentMs(s, const ['t0', 'start_ms', 'startMs', 'start']);
+      final t1 = _readSegmentMs(s, const ['t1', 'end_ms', 'endMs', 'end']) ?? t0;
+      out.addAll(_splitSegmentOnSentences(WhisperSegment(
+        startMs: t0 ?? 0,
+        endMs: t1 ?? (t0 ?? 0),
+        text: text,
+      )));
+    }
+    return out;
+  }
+
+  /// Splits a single Whisper segment on sentence-ending punctuation, dividing
+  /// the segment's time window proportionally by character count.
+  ///
+  /// Whisper's cloud path tends to return one big segment per utterance even
+  /// when there are clear sentence boundaries / pauses, so we split here to
+  /// get usable per-sentence timestamps.
+  static List<WhisperSegment> _splitSegmentOnSentences(WhisperSegment seg) {
+    final pieces = <String>[];
+    final matches = RegExp(r'[^.!?]+[.!?]+|\S[^.!?]*$').allMatches(seg.text);
+    for (final m in matches) {
+      final p = m.group(0)!.trim();
+      if (p.isNotEmpty) pieces.add(p);
+    }
+    if (pieces.length <= 1) return [seg];
+    final totalChars = pieces.fold<int>(0, (a, b) => a + b.length);
+    final duration = seg.endMs - seg.startMs;
+    final out = <WhisperSegment>[];
+    var charsSoFar = 0;
+    for (final p in pieces) {
+      final startMs = totalChars == 0
+          ? seg.startMs
+          : seg.startMs + (charsSoFar * duration / totalChars).round();
+      charsSoFar += p.length;
+      final endMs = totalChars == 0
+          ? seg.endMs
+          : seg.startMs + (charsSoFar * duration / totalChars).round();
+      out.add(WhisperSegment(startMs: startMs, endMs: endMs, text: p));
+    }
+    return out;
+  }
+
+  /// Reads the first present timestamp field and returns it in milliseconds.
+  /// Treats values < 1000 as seconds (whisper "start"/"end" floats), values
+  /// in [1000, 100000) as centiseconds (whisper.cpp `t0`/`t1`), and larger
+  /// values as already-in-ms.
+  static int? _readSegmentMs(Map<String, dynamic> seg, List<String> keys) {
+    for (final k in keys) {
+      final v = seg[k];
+      if (v is num) {
+        final d = v.toDouble();
+        if (k == 'start' || k == 'end') return (d * 1000).round();
+        if (d < 100000) return (d * 10).round(); // centiseconds → ms
+        return d.round();
+      }
+    }
+    return null;
   }
 
   void dispose() {
